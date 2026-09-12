@@ -44,6 +44,10 @@ ffmpeg -framerate 30 -i frames/frame_%04d.png -c:v libx264 -pix_fmt yuv420p -crf
 | `npm run frames`   | frames only (`--no-video`)                     |
 | `npm run video`    | stitch frames already on disk (`--skip-frames`)|
 
+Grain is expensive to compress: at the specified `-crf 18` the 12 s master
+lands around 30 MB. `node export.js --crf 22` gives roughly a third of
+that with no visible difference after a platform re-encode.
+
 ### export.js options
 
 ```
