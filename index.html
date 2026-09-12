@@ -91,11 +91,11 @@ const C_FAB_DARK  = [ 49,  55,  29];   // wrinkle shadow
 const C_FAB_AO    = [ 37,  42,  24];   // crease occlusion
 const C_INK       = [ 43,  43,  40];   // #2B2B28 charcoal
 const C_HOT       = [232,  81,  58];   // #E8513A accent
-const C_SHELL     = [235, 228, 213];   // iron body
-const C_SHELL_DK  = [206, 197, 179];
+const C_SHELL     = [226, 218, 201];   // iron body
+const C_SHELL_DK  = [191, 181, 161];
 const C_METAL     = [216, 213, 203];   // soleplate
 const C_METAL_DK  = [152, 150, 139];
-const C_GRIP      = [ 56,  56,  50];
+const C_GRIP      = [ 79,  79,  71];
 
 const rgb  = c => 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')';
 const rgba = (c, a) => 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')';
@@ -107,7 +107,6 @@ const lerp   = (a, b, k) => a + (b - a) * k;
 const seg    = (t, a, b) => clamp01((t - a) / (b - a));
 
 const smoothstep   = (e0, e1, x) => { const k = clamp01((x - e0) / (e1 - e0)); return k * k * (3 - 2 * k); };
-const smoothPulse  = k => { k = clamp01(k); return k * k * (3 - 2 * k); };
 const smootherstep = k => { k = clamp01(k); return k * k * k * (k * (k * 6 - 15) + 10); };
 const easeOutCubic = k => { k = clamp01(k); const m = 1 - k; return 1 - m * m * m; };
 const easeInCubic  = k => { k = clamp01(k); return k * k * k; };
@@ -130,7 +129,7 @@ const SEED = 20260912;
    ====================================================================== */
 const P = {
   ironSpeed:   1.00,   // multiplier on the glide travel distance
-  wrinkleCount:  60,   // number of procedural wrinkle clusters
+  wrinkleDensity: 22,  // crease clusters per 1e6 world px^2 of cloth
   smoothMs:     250,   // per-wrinkle relax duration (ms), ease-out
   showBoundary: false, // debug: draw the wrinkle-boundary line
   cell:           7    // target on-screen size of one mesh quad, px
@@ -150,17 +149,17 @@ const FAB_BLUR = 2.6;   // composite blur that dissolves quad faceting
    Shading comes from the gradient of h, so ridges read as light/dark
    bands running across each crease rather than as drawn lines.
    ====================================================================== */
-const FAB = { x0: -360, y0: 560, w: 1860, h: 1620 };
+const FAB = { x0: -400, y0: 560, w: 3240, h: 1620 };
 const V_IRON = 0.30;                  // the fabric row the iron rides on
 
 /* macro shape of the cloth: wavy drape edge at the top, a gentle sag */
 function fabX(u, v) { return FAB.x0 + u * FAB.w + 14 * Math.sin(v * 2.3 + 1.1); }
 function fabY(u, v) {
-  const edge = 34 * Math.sin(u * 4.1 + 0.7) + 12 * Math.sin(u * 7.9 + 2.4);
+  const edge = 34 * Math.sin(u * 6.58 + 0.7) + 12 * Math.sin(u * 12.67 + 2.4);
   return FAB.y0
        + edge * Math.pow(1 - v, 2.6)
        + v * FAB.h
-       + 26 * Math.sin(u * 2.1 + 0.4) * Math.sin(v * Math.PI);
+       + 26 * Math.sin(u * 3.37 + 0.4) * Math.sin(v * Math.PI);
 }
 const uOfX = x => (x - FAB.x0) / FAB.w;
 /* world y of the cloth surface under the iron at world x */
@@ -180,7 +179,8 @@ function drapeH(x, y) {
    --------------------------------------------------------------------- */
 let WR = [];
 
-function buildWrinkles(count) {
+function buildWrinkles(density) {
+  const count = Math.max(4, Math.round(density * FAB.w * FAB.h / 1e6));
   const rnd = mulberry32(SEED);
 
   /* three scales of crease so the cloth has a hierarchy -- a few long
@@ -262,18 +262,29 @@ function wrinkleH(x, y) {
    transition so the boundary is crisp but never a hard aliased step.
    ====================================================================== */
 const T_PRESS = 2.55, T_LAND = 3.00, T_GLIDE_END = 8.00;
-const PLATE_BACK = 104, PLATE_NOSE = 136;
+/* iron shapes are authored in local px then drawn at IRON_S; PLATE_BACK /
+   PLATE_NOSE are the world-space offsets of the plate's rear and nose */
+const IRON_S = 1.55, LP_BACK = 128, LP_NOSE = 174;
+const PLATE_BACK = LP_BACK * IRON_S, PLATE_NOSE = LP_NOSE * IRON_S;
 const X_START = 40, BASE_TRAVEL = 1192;
 const GATE_BAND = 11, PRE_RELAX = 150;
+const CX_GLIDE = 235, SCREEN_TRAVEL = 480;
+const T_SETTLE_OUT = 9.15;          // creases fully settled by here
 
 let PASS = { L: 1e9, R: -1e9 };
 
-const travel   = () => BASE_TRAVEL * P.ironSpeed;
+const travel   = () => Math.min(BASE_TRAVEL * P.ironSpeed,
+                                FAB.x0 + FAB.w - 80 - PLATE_NOSE - X_START);
 const xEnd     = () => X_START + travel();
 const rFinal   = () => xEnd() - PLATE_BACK;
-const finalCx  = () => rFinal() - 588;
+const FINAL_ZOOM = 1.00;
+const camLimit = (cx, z) => {
+  const half = (W * 0.5) / z;
+  return clamp(cx, FAB.x0 + half + 30, FAB.x0 + FAB.w - half - 30);
+};
+const finalCx  = () => camLimit(rFinal() - (W * 0.5) / FINAL_ZOOM - 22, FINAL_ZOOM);
 /* camera follows part of the iron's travel so it stays framed */
-const followF  = () => clamp(1 - 633 / (travel() * 1.30), 0.15, 0.90);
+const followF  = () => clamp(1 - SCREEN_TRAVEL / (travel() * 1.30), 0.15, 0.90);
 
 /* horizontal position of the soleplate centre during the glide */
 function glideX(t) {
@@ -287,7 +298,9 @@ function passAt(t) {
   const r0 = X_START - PLATE_BACK;
   if (t < T_LAND)           return { L: lerp(r0, FAB.x0 - 140, easeOutCubic(seg(t, T_PRESS, T_LAND))), R: r0 };
   if (t <= T_GLIDE_END)     return { L: FAB.x0 - 140, R: glideX(t) - PLATE_BACK };
-  return { L: FAB.x0 - 140, R: rFinal() };
+  /* the iron has lifted: the last creases settle out ahead of the camera
+     pull-back, so the reveal is of genuinely smooth cloth */
+  return { L: FAB.x0 - 140, R: lerp(rFinal(), FAB.x0 + FAB.w + 240, smootherstep(seg(t, T_GLIDE_END, T_SETTLE_OUT))) };
 }
 
 function gateAt(x) {
@@ -310,7 +323,7 @@ function solvePassTimes() {
   const dt = 0.004;
   for (let i = 0; i < WR.length; i++) WR[i].t0 = Infinity;
   let pending = WR.length;
-  for (let t = T_PRESS; t <= T_GLIDE_END + dt && pending > 0; t += dt) {
+  for (let t = T_PRESS; t <= T_SETTLE_OUT + dt && pending > 0; t += dt) {
     PASS = passAt(t);
     for (let i = 0; i < WR.length; i++) {
       const w = WR[i];
@@ -329,7 +342,7 @@ function updateSmoothness(t) {
 }
 
 function rebuild() {
-  WR = buildWrinkles(P.wrinkleCount);
+  WR = buildWrinkles(P.wrinkleDensity);
   solvePassTimes();
 }
 
@@ -343,16 +356,16 @@ function camAt(t) {
     z = lerp(1.66, 1.86, k); cx = lerp(470, 436, k); cy = lerp(1168, 1128, k);
   } else if (t <= T_LAND) {                      // 2.0-3.0  ease out to working framing
     const k = smootherstep(seg(t, 2, T_LAND));
-    z = lerp(1.86, 1.30, k); cx = lerp(436, 250, k); cy = lerp(1128, 1026, k);
+    z = lerp(1.86, 1.30, k); cx = lerp(436, CX_GLIDE, k); cy = lerp(1128, 1026, k);
   } else if (t <= T_GLIDE_END) {                 // 3.0-8.0  track the iron
-    z = 1.30; cx = 250 + followF() * (glideX(t) - X_START); cy = 1026;
+    z = 1.30; cx = camLimit(CX_GLIDE + followF() * (glideX(t) - X_START), 1.30); cy = 1026;
   } else if (t <= 10) {                          // 8.0-10.0 pull back for the reveal
     const k = smootherstep(seg(t, T_GLIDE_END, 10));
-    const cx8 = 250 + followF() * travel();
-    z = lerp(1.30, 0.95, k); cx = lerp(cx8, finalCx(), k); cy = lerp(1026, 986, k);
+    const cx8 = camLimit(CX_GLIDE + followF() * travel(), 1.30);
+    z = lerp(1.30, FINAL_ZOOM, k); cx = lerp(cx8, finalCx(), k); cy = lerp(1026, 986, k);
   } else {                                       // 10.0-12.0 settle
     const k = smootherstep(seg(t, 10, 12));
-    z = lerp(0.95, 0.92, k); cx = finalCx(); cy = lerp(986, 994, k);
+    z = lerp(FINAL_ZOOM, FINAL_ZOOM - 0.035, k); cx = finalCx(); cy = lerp(986, 996, k);
   }
   return { z: z, cx: cx, cy: cy };
 }
@@ -474,6 +487,7 @@ function lutIndex(s, a) {
 const MAXC = 330, MAXR = 400, MAXN = (MAXC + 1) * (MAXR + 1);
 const gX = new Float32Array(MAXN), gY = new Float32Array(MAXN),
       gH = new Float32Array(MAXN), gS = new Float32Array(MAXN), gA = new Float32Array(MAXN);
+let lastQuads = 0;                    // reported in the dev panel
 
 /* silhouette of the cloth: wavy drape edge on top, off-frame elsewhere */
 function fabricPath(g, cam) {
@@ -513,6 +527,7 @@ function drawFabric(g, cam, iron, light) {
 
   const cols = clamp(Math.round((u1 - u0) * FAB.w * cam.z / P.cell), 4, MAXC);
   const rows = clamp(Math.round((v1 - v0) * FAB.h * cam.z / P.cell), 4, MAXR);
+  lastQuads = cols * rows;
   const du = (u1 - u0) / cols, dv = (v1 - v0) / rows;
   const dxw = du * FAB.w, dyw = dv * FAB.h;
   const stride = cols + 1;
@@ -637,7 +652,7 @@ function drawClothDetail(ctx, cam, iron) {
 
   /* seams follow the displaced surface, so they buckle then straighten */
   const seams = [
-    { kind: 'v', at: 0.705, a: 0.0, b: 1.0 },
+    { kind: 'v', at: 0.401, a: 0.0, b: 1.0 },
     { kind: 'h', at: 0.135, a: 0.02, b: 0.98 }
   ];
   for (const sm of seams) {
@@ -668,37 +683,589 @@ function drawClothDetail(ctx, cam, iron) {
   }
 }
 
-/* ===== TEMPORARY FABRIC-ONLY VERIFICATION TAIL (removed later) ===== */
-const can = document.getElementById('stage');
-const ctx = can.getContext('2d', { alpha: false });
-const fcan = document.createElement('canvas'); fcan.width = W; fcan.height = H;
+/* ======================================================================
+   8. THE IRON
+   ----------------------------------------------------------------------
+   Drawn in a local frame whose origin is the soleplate's contact point:
+   local (0,0) sits exactly on the cloth surface and local -y is up, so
+   the plate's bottom edge is flush on the fabric plane by construction.
+   ====================================================================== */
+
+/* soleplate: flat bottom edge (local y = 0), wedge section that thins
+   toward a tapered nose pointing in the direction of travel */
+function platePath(g) {
+  g.beginPath();
+  g.moveTo(-134, -36);
+  g.lineTo(-128, -12);
+  g.quadraticCurveTo(-125, 0, -112, 0);
+  g.lineTo(120, 0);
+  g.quadraticCurveTo(152, -3, LP_NOSE, -20);
+  g.lineTo(150, -26);
+  g.closePath();
+}
+
+/* body shell: upright heel, top sloping forward, front converging on the
+   plate's nose. Its skirt overlaps the plate top so there is no seam gap. */
+function bodyPath(g) {
+  g.beginPath();
+  g.moveTo(-132, -30);
+  g.bezierCurveTo(-141, -90, -140, -148, -122, -170);
+  g.bezierCurveTo(-110, -184, -88, -191, -62, -187);
+  g.bezierCurveTo(-6, -179, 54, -157, 96, -127);
+  g.bezierCurveTo(126, -105, 150, -74, 159, -41);
+  g.bezierCurveTo(161, -31, 160, -24, 158, -22);
+  g.closePath();
+}
+
+const GRIP = [-106, -154, -88, -222, -2, -224, 54, -156];
+
+function gripPath(g) {
+  g.beginPath();
+  g.moveTo(GRIP[0], GRIP[1]);
+  g.bezierCurveTo(GRIP[2], GRIP[3], GRIP[4], GRIP[5], GRIP[6], GRIP[7]);
+}
+
+function drawIron(g, cam, iron, t) {
+  const s = cam.z * IRON_S;
+
+  g.save();
+  g.translate(sxOf(iron.x, cam), syOf(iron.cy - iron.lift, cam));
+  g.scale(s, s);
+  g.rotate(iron.tilt);
+  g.lineJoin = 'round';
+  g.lineCap = 'round';
+
+  /* ---- soleplate ---------------------------------------------------- */
+  let mg = g.createLinearGradient(0, -36, 0, 0);
+  mg.addColorStop(0.00, 'rgb(223,220,210)');
+  mg.addColorStop(0.42, rgb(C_METAL));
+  mg.addColorStop(1.00, rgb(C_METAL_DK));
+  platePath(g); g.fillStyle = mg; g.fill();
+  platePath(g); g.strokeStyle = rgb(C_INK); g.lineWidth = 4.2; g.stroke();
+
+  /* contact edge and steam vents on the plate bevel */
+  g.beginPath();
+  g.moveTo(-108, -3); g.lineTo(130, -3);
+  g.strokeStyle = 'rgba(43,43,40,0.30)'; g.lineWidth = 3; g.stroke();
+  g.fillStyle = 'rgba(43,43,40,0.46)';
+  for (let i = 0; i < 6; i++) {
+    g.beginPath();
+    g.ellipse(-58 + i * 33, -11, 5.6, 2.6, 0, 0, Math.PI * 2);
+    g.fill();
+  }
+
+  /* ---- body shell --------------------------------------------------- */
+  let bg = g.createLinearGradient(-100, -186, 130, -30);
+  bg.addColorStop(0.00, 'rgb(242,236,224)');
+  bg.addColorStop(0.46, rgb(C_SHELL));
+  bg.addColorStop(1.00, rgb(C_SHELL_DK));
+  bodyPath(g); g.fillStyle = bg; g.fill();
+
+  g.save();
+  bodyPath(g); g.clip();
+
+  /* soft highlight raking across the shell */
+  g.save();
+  g.translate(-30, -128); g.rotate(-0.30);
+  g.beginPath(); g.ellipse(0, 0, 86, 25, 0, 0, Math.PI * 2);
+  g.fillStyle = 'rgba(255,255,252,0.40)'; g.fill();
+  g.restore();
+
+  /* water-level window at the heel */
+  g.save();
+  g.translate(-108, -104); g.rotate(-0.08);
+  g.beginPath(); g.roundRect(-13, -32, 26, 64, 13);
+  g.fillStyle = 'rgba(224,220,206,0.9)'; g.fill();
+  g.strokeStyle = 'rgba(43,43,40,0.26)'; g.lineWidth = 2.6; g.stroke();
+  g.beginPath(); g.roundRect(-8, 2, 16, 26, 8);
+  g.fillStyle = 'rgba(172,180,160,0.8)'; g.fill();
+  g.restore();
+
+  /* hot accent band wrapping the heel */
+  g.beginPath();
+  g.moveTo(-137, -74);
+  g.bezierCurveTo(-141, -96, -142, -112, -141, -126);
+  g.strokeStyle = rgba(C_HOT, 0.95); g.lineWidth = 15; g.stroke();
+
+  /* shoulder seam and the shaded skirt where the shell meets the plate */
+  g.beginPath();
+  g.moveTo(-138, -120); g.bezierCurveTo(-86, -128, -4, -108, 88, -62);
+  g.strokeStyle = 'rgba(43,43,40,0.24)'; g.lineWidth = 3; g.stroke();
+  let sg = g.createLinearGradient(0, -62, 0, -22);
+  sg.addColorStop(0, 'rgba(43,43,40,0)');
+  sg.addColorStop(1, 'rgba(43,43,40,0.30)');
+  g.fillStyle = sg; g.fillRect(-150, -62, 320, 42);
+  g.restore();
+
+  bodyPath(g); g.strokeStyle = rgb(C_INK); g.lineWidth = 4.4; g.stroke();
+
+  /* ---- digital display on the forward slope ------------------------- */
+  g.save();
+  g.translate(70, -124); g.rotate(-0.54);
+  const dw = 45, dh = 25;
+  const glow = 0.58 + 0.42 * Math.sin(t * 2.1);
+  g.beginPath(); g.roundRect(-dw / 2, -dh / 2, dw, dh, 7);
+  g.fillStyle = 'rgb(30,30,26)'; g.fill();
+  g.save(); g.beginPath(); g.roundRect(-dw / 2, -dh / 2, dw, dh, 7); g.clip();
+  const dg = g.createRadialGradient(0, 2, 0, 0, 2, dw * 0.85);
+  dg.addColorStop(0, rgba(C_HOT, 0.60 * glow));
+  dg.addColorStop(1, rgba(C_HOT, 0));
+  g.fillStyle = dg; g.fillRect(-dw, -dh, dw * 2, dh * 2);
+  g.fillStyle = rgba(C_HOT, 0.95);
+  for (let i = 0; i < 3; i++) g.fillRect(-14 + i * 10, -2 - i * 2.2, 5.5, 5 + i * 2.2);
+  g.restore();
+  g.beginPath(); g.roundRect(-dw / 2, -dh / 2, dw, dh, 7);
+  g.strokeStyle = rgb(C_INK); g.lineWidth = 3.2; g.stroke();
+  g.restore();
+
+  /* ---- grip --------------------------------------------------------- */
+  gripPath(g); g.strokeStyle = rgb(C_INK); g.lineWidth = 38; g.stroke();
+  gripPath(g); g.strokeStyle = rgb(C_GRIP); g.lineWidth = 30; g.stroke();
+  g.beginPath();
+  g.moveTo(-104, -166);
+  g.bezierCurveTo(-86, -234, -2, -236, 50, -168);
+  g.strokeStyle = 'rgba(240,234,219,0.22)'; g.lineWidth = 6; g.stroke();
+  g.strokeStyle = 'rgba(18,18,15,0.36)'; g.lineWidth = 4;
+  for (let i = 0; i < 3; i++) {
+    const p = cubicPt(GRIP[0], GRIP[1], GRIP[2], GRIP[3], GRIP[4], GRIP[5], GRIP[6], GRIP[7], 0.30 + i * 0.20);
+    g.beginPath();
+    g.arc(p[0], p[1] + 13, 7, 0.16 * Math.PI, 0.84 * Math.PI);
+    g.stroke();
+  }
+  /* steam trigger */
+  g.beginPath();
+  g.moveTo(-44, -202); g.lineTo(-18, -204); g.lineTo(-31, -189);
+  g.closePath();
+  g.fillStyle = rgba(C_HOT, 0.9); g.fill();
+
+  g.restore();
+}
+
+function cubicPt(x0, y0, x1, y1, x2, y2, x3, y3, k) {
+  const m = 1 - k, a = m * m * m, b = 3 * m * m * k, c = 3 * m * k * k, d = k * k * k;
+  return [a * x0 + b * x1 + c * x2 + d * x3, a * y0 + b * y1 + c * y2 + d * y3];
+}
+
+/* ----------------------------------------------------------------------
+   Contact shadow. Sits on the cloth plane (not on the iron), so it stays
+   put as the iron rises, and tightens as the plate presses down. This is
+   what reads as contact.
+   ---------------------------------------------------------------------- */
+function drawContactShadow(g, cam, iron) {
+  if (!iron.vis) return;
+  const z = cam.z;
+  const soft = clamp01(iron.lift / 320);
+  const press = 1 - soft;
+  /* the pool fades out entirely once the iron is far above the cloth, so
+     it never pops into view with the iron on its way in or out */
+  const near = 1 - smoothstep(240, 600, iron.lift);
+  if (near <= 0.001) return;
+
+  g.save();
+  g.translate(sxOf(iron.x, cam), syOf(iron.cy, cam));
+  g.scale(z, z);
+
+  /* broad ambient pool, thrown slightly away from the light and
+     spreading out as the iron rises */
+  const rx = (PLATE_BACK + 128) * (1 + soft * 0.78);
+  const ry = 84 + 70 * soft;
+  let gr = g.createRadialGradient(26, 6, 0, 26, 6, rx);
+  gr.addColorStop(0.00, 'rgba(36,39,27,' + (0.58 * near * (1 - soft * 0.74)).toFixed(3) + ')');
+  gr.addColorStop(0.52, 'rgba(36,39,27,' + (0.25 * near * (1 - soft * 0.68)).toFixed(3) + ')');
+  gr.addColorStop(1.00, 'rgba(36,39,27,0)');
+  g.save();
+  g.scale(1, ry / rx);
+  g.beginPath(); g.arc(0, 0, rx, 0, Math.PI * 2);
+  g.fillStyle = gr; g.fill();
+  g.restore();
+
+  /* tight dark core right under the plate: tightens as it presses down */
+  if (press > 0.02) {
+    const w = PLATE_BACK + 30, hh = 15 + 16 * (1 - press);
+    let cg = g.createLinearGradient(-w, 0, w, 0);
+    const aa = (0.62 * press * near).toFixed(3);
+    cg.addColorStop(0.00, 'rgba(26,29,18,0)');
+    cg.addColorStop(0.14, 'rgba(26,29,18,' + aa + ')');
+    cg.addColorStop(0.88, 'rgba(26,29,18,' + aa + ')');
+    cg.addColorStop(1.00, 'rgba(26,29,18,0)');
+    g.save();
+    g.scale(1, hh / w);
+    g.beginPath(); g.arc(10, 0, w, 0, Math.PI * 2);
+    g.fillStyle = cg; g.fill();
+    g.restore();
+  }
+  g.restore();
+}
+
+/* ======================================================================
+   9. STEAM
+   ----------------------------------------------------------------------
+   Deterministic particle system: wisp i is born at a fixed time, so its
+   whole life is a function of t. Each wisp is emitted at the contact
+   point AS IT WAS at its birth time, so the trail is left behind in
+   world space as the iron moves on.
+   ====================================================================== */
+const STEAM_RATE = 28, STEAM_LIFE = 1.25;
+const T_STEAM_ON = 2.88, T_STEAM_OFF = 8.02;
+const REST_RATE = 2.6, T_REST_ON = 10.60;
+
+/* pre-rendered soft puff sprite, drawn stretched so each wisp reads as a
+   rising streak rather than a dot */
+function puffSprite(col) {
+  const S = 128, c = document.createElement('canvas');
+  c.width = c.height = S;
+  const g = c.getContext('2d');
+  const gr = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+  gr.addColorStop(0.00, rgba(col, 1));
+  gr.addColorStop(0.38, rgba(col, 0.40));
+  gr.addColorStop(1.00, rgba(col, 0));
+  g.fillStyle = gr; g.fillRect(0, 0, S, S);
+  return c;
+}
+const PUFF_WARM = puffSprite([253, 248, 236]);
+const PUFF_HOT  = puffSprite(C_HOT);
+
+function wispOf(i, seed) {
+  const r = mulberry32(seed + i * 7919);
+  /* most of the plume escapes ahead of the nose, the rest off the heel,
+     so both rise clear of the body silhouette */
+  const front = r() < 0.64;
+  return {
+    sx:  front ? PLATE_NOSE - 40 + 150 * r() : -PLATE_BACK - 120 * r(),
+    wob: 0.8 + 2.0 * r(),
+    ph:  r() * 6.283,
+    dft: (front ? 12 : -16) + (r() - 0.5) * 34,
+    sz:  0.72 + 0.62 * r(),
+    life: STEAM_LIFE * (0.72 + 0.48 * r())
+  };
+}
+
+function drawSteam(g, cam, t) {
+  const z = cam.z;
+  const batches = [
+    { t0: T_STEAM_ON, t1: T_STEAM_OFF, rate: STEAM_RATE, seed: 4400, amp: 1.00 },
+    { t0: T_REST_ON,  t1: DUR,         rate: REST_RATE,  seed: 9100, amp: 0.50 }
+  ];
+  g.save();
+  for (const B of batches) {
+    const dt = 1 / B.rate;
+    const iFirst = Math.max(0, Math.ceil((t - STEAM_LIFE * 1.3 - B.t0) / dt));
+    const iLast  = Math.floor((Math.min(t, B.t1) - B.t0) / dt);
+    for (let i = iFirst; i <= iLast; i++) {
+      const age = t - (B.t0 + i * dt);
+      if (age < 0) continue;
+      const wp = wispOf(i, B.seed);
+      if (age > wp.life) continue;
+      const k = age / wp.life;
+
+      /* emitted from the contact point AS IT WAS at the birth time, so
+         the plume is left behind in world space as the iron moves on */
+      const born = ironAt(B.t0 + i * dt);
+      const rise = 210 * age * (1 - 0.22 * age);
+      const wx = born.x + wp.sx + Math.sin(age * wp.wob + wp.ph) * 30 * age + wp.dft * age + 26 * age;
+      const wy = born.cy - 14 - rise;
+
+      const fade = smoothstep(0, 0.12, k) * Math.pow(1 - smoothstep(0.28, 0.94, k), 1.4);
+      const rad = (15 + 26 * k) * wp.sz * z;
+      const sX = sxOf(wx, cam), sY = syOf(wy, cam);
+      const rw = rad * 0.58, rh = rad * (1.55 + 1.5 * k);  // stretches as it dissipates
+      if (sX + rw < 0 || sX - rw > W || sY + rh < 0 || sY - rh > H) continue;
+
+      g.globalAlpha = 0.52 * fade * B.amp;
+      g.drawImage(PUFF_WARM, sX - rw, sY - rh, rw * 2, rh * 2);
+
+      /* hot at the plate, cooling to warm white as it climbs */
+      const hot = Math.max(0, 1 - k * 3.4);
+      if (hot > 0.01) {
+        g.globalCompositeOperation = 'lighter';
+        g.globalAlpha = 0.30 * fade * hot * B.amp;
+        g.drawImage(PUFF_HOT, sX - rw * 0.8, sY - rh * 0.7, rw * 1.6, rh * 1.4);
+        g.globalCompositeOperation = 'source-over';
+      }
+    }
+  }
+  g.globalAlpha = 1;
+  g.restore();
+}
+
+/* ======================================================================
+   10. FINISHING PASSES
+   ====================================================================== */
+/* deterministic paper grain, generated once */
+const GRAIN = (function () {
+  const S = 220, c = document.createElement('canvas');
+  c.width = c.height = S;
+  const g = c.getContext('2d'), im = g.createImageData(S, S), d = im.data;
+  const rnd = mulberry32(SEED ^ 0x5f3a);
+  for (let i = 0; i < d.length; i += 4) {
+    const v = 118 + (rnd() - 0.5) * 150;
+    d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
+  }
+  g.putImageData(im, 0, 0);
+  return c;
+})();
+let GRAIN_PAT = null;
+
+/* warm bloom behind the iron for the closing beat */
+function drawRestGlow(g, cam, iron, t) {
+  const k = smootherstep(seg(t, 10.35, 11.25)) * (1 - 0.15 * smootherstep(seg(t, 11.6, 12)));
+  if (k <= 0.001) return;
+  const cx = sxOf(iron.x, cam), cy = syOf(iron.cy - 96, cam), r = 560 * cam.z;
+  let gr = g.createRadialGradient(cx, cy, 0, cx, cy, r);
+  gr.addColorStop(0.00, 'rgba(255,246,226,' + (0.42 * k).toFixed(3) + ')');
+  gr.addColorStop(0.34, 'rgba(255,236,205,' + (0.18 * k).toFixed(3) + ')');
+  gr.addColorStop(0.70, rgba(C_HOT, 0.060 * k));
+  gr.addColorStop(1.00, rgba(C_HOT, 0));
+  g.fillStyle = gr;
+  g.fillRect(0, 0, W, H);
+
+  /* faint heat rim hugging the plate's contact edge */
+  const ry = syOf(iron.cy, cam), rx = sxOf(iron.x, cam), rw = PLATE_BACK * 1.1 * cam.z;
+  let rg = g.createLinearGradient(rx - rw, 0, rx + rw, 0);
+  rg.addColorStop(0.00, rgba(C_HOT, 0));
+  rg.addColorStop(0.50, rgba(C_HOT, 0.16 * k));
+  rg.addColorStop(1.00, rgba(C_HOT, 0));
+  g.save();
+  g.globalCompositeOperation = 'lighter';
+  g.fillStyle = rg;
+  g.fillRect(rx - rw, ry - 12 * cam.z, rw * 2, 22 * cam.z);
+  g.restore();
+}
+
+function drawFinish(g) {
+  /* vignette */
+  let gr = g.createRadialGradient(W * 0.44, H * 0.42, H * 0.24, W * 0.5, H * 0.5, H * 0.80);
+  gr.addColorStop(0, 'rgba(43,43,40,0)');
+  gr.addColorStop(1, 'rgba(43,43,40,0.17)');
+  g.fillStyle = gr; g.fillRect(0, 0, W, H);
+
+  /* grain */
+  if (!GRAIN_PAT) GRAIN_PAT = g.createPattern(GRAIN, 'repeat');
+  g.save();
+  g.globalCompositeOperation = 'overlay';
+  g.globalAlpha = 0.055;
+  g.fillStyle = GRAIN_PAT;
+  g.fillRect(0, 0, W, H);
+  g.restore();
+}
+
+/* debug: the wrinkle boundary, locked to the plate's trailing edge */
+function drawBoundary(g, cam, iron) {
+  if (PASS.R < -1e8) return;
+  const x = sxOf(PASS.R, cam);
+  g.save();
+  g.strokeStyle = rgb(C_HOT); g.lineWidth = 2.5;
+  g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
+  g.setLineDash([12, 12]);
+  g.strokeStyle = rgba(C_HOT, 0.5); g.lineWidth = 2;
+  const xr = sxOf(PASS.R + PRE_RELAX, cam);
+  g.beginPath(); g.moveTo(xr, 0); g.lineTo(xr, H); g.stroke();
+  if (iron.vis) {
+    g.setLineDash([]);
+    g.strokeStyle = 'rgba(60,140,220,0.85)'; g.lineWidth = 2;
+    const y = syOf(iron.cy, cam);
+    g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke();
+  }
+  g.restore();
+}
+
+/* ======================================================================
+   11. FRAME ASSEMBLY
+   ====================================================================== */
+const can  = document.getElementById('stage');
+const ctx  = can.getContext('2d', { alpha: false });
+const fcan = document.createElement('canvas');
+fcan.width = W; fcan.height = H;
 const fctx = fcan.getContext('2d');
-const canBlur = (function(){ const c = document.createElement('canvas').getContext('2d'); c.filter='blur(2px)'; return c.filter==='blur(2px)'; })();
-rebuild();
-let _blur = FAB_BLUR; window.setBlur = b => { _blur = b; };
-window.TOTAL_FRAMES = TOTAL_FRAMES;
-window.stats = {};
-function render(tn){
-  const t = tn * DUR, cam = camAt(t), iron = ironAt(t), light = lightAt(t);
-  PASS = passAt(t); updateSmoothness(t);
+
+/* ctx.filter dissolves the quad faceting; fall back gracefully */
+const CAN_BLUR = (function () {
+  const c = document.createElement('canvas').getContext('2d');
+  c.filter = 'blur(2px)';
+  return c.filter === 'blur(2px)';
+})();
+
+let lastMs = 0;
+
+function render(tn) {
   const t0 = performance.now();
+  const t = tn * DUR;
+
+  const cam   = camAt(t);
+  const iron  = ironAt(t);
+  const light = lightAt(t);
+  PASS = passAt(t);
+  updateSmoothness(t);
+
   drawBackground(ctx, cam, light);
+
   drawFabric(fctx, cam, iron, light);
-  const tm = performance.now();
-  ctx.save(); if (canBlur) ctx.filter = 'blur(' + _blur + 'px)'; ctx.drawImage(fcan, 0, 0); ctx.restore();
+  ctx.save();
+  if (CAN_BLUR) ctx.filter = 'blur(' + FAB_BLUR + 'px)';
+  ctx.drawImage(fcan, 0, 0);
+  ctx.restore();
+
   drawClothLight(ctx, cam, light);
   drawClothDetail(ctx, cam, iron);
-  if (P.showBoundary && PASS.R > -1e8) {
-    ctx.strokeStyle = rgb(C_HOT); ctx.lineWidth = 3;
-    const x = sxOf(PASS.R, cam);
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
-  }
-  window.stats = { mesh: tm - t0, total: performance.now() - t0 };
+
+  if (P.showBoundary) drawBoundary(ctx, cam, iron);
+
+  drawRestGlow(ctx, cam, iron, t);
+  drawContactShadow(ctx, cam, iron);
+  if (iron.vis) drawIron(ctx, cam, iron, t);
+  drawSteam(ctx, cam, t);
+
+  drawFinish(ctx);
+
+  lastMs = performance.now() - t0;
 }
-window.seek = function(tn){ tn = clamp01(tn); render(tn); return tn; };
-window.snapshot = () => can.toDataURL('image/png');
-window.P = P; window.rebuild = rebuild;
+
+/* ======================================================================
+   12. PUBLIC API  —  everything the exporter needs
+   ====================================================================== */
+let current = 0, playing = true, rafId = 0, epoch = 0;
+
+/* Renders the exact frame for t in [0,1]. Synchronous and stateless, so
+   two calls with the same t always produce identical pixels. */
+window.seek = function (t) {
+  t = clamp01(Number(t) || 0);
+  current = t;
+  playing = false;
+  render(t);
+  syncPanel();
+  return t;
+};
+window.seekFrame = f => window.seek(f / TOTAL_FRAMES);
+window.snapshot  = (type, q) => can.toDataURL(type || 'image/png', q);
+window.play  = function () { playing = true; epoch = performance.now() - current * DUR * 1000; };
+window.pause = function () { playing = false; };
+window.setParams = function (o) {
+  let needs = false;
+  for (const k in o) {
+    if (!(k in P)) continue;
+    if ((k === 'wrinkleDensity' || k === 'ironSpeed') && P[k] !== o[k]) needs = true;
+    P[k] = o[k];
+  }
+  if (needs) rebuild();
+  render(current);
+  syncPanel();
+};
+window.TOTAL_FRAMES = TOTAL_FRAMES;
+window.DURATION = DUR;
+window.FPS = FPS;
+window.PARAMS = P;
+
+/* ---------------------------- playback loop ---------------------------- */
+function tick(now) {
+  rafId = requestAnimationFrame(tick);
+  if (!playing) return;
+  current = ((now - epoch) / (DUR * 1000)) % 1;
+  render(current);
+  syncPanel();
+}
+
+/* ======================================================================
+   13. DEV PANEL  —  only built for ?debug=1, so it can never appear in
+   an exported frame (the exporter also grabs the canvas directly).
+   ====================================================================== */
+const DEBUG = /(?:^|[?&])debug=1(?:&|$)/.test(location.search);
+let panel = null, els = null;
+
+function buildPanel() {
+  const wrap = document.createElement('div');
+  wrap.id = 'panel';
+  wrap.innerHTML =
+    '<h4>Iron &mdash; dev</h4>' +
+    '<div class="scrub"><input id="p_scrub" type="range" min="0" max="' + (TOTAL_FRAMES - 1) + '" step="1" value="0"></div>' +
+    row('p_speed', 'Iron speed', 0.60, 2.00, 0.01, P.ironSpeed) +
+    row('p_dens',  'Wrinkle dens.', 6,   40,    1, P.wrinkleDensity) +
+    row('p_smooth','Smoothing',    60,  900,   10, P.smoothMs) +
+    '<div class="bar">' +
+      '<button id="p_play">Pause</button>' +
+      '<button id="p_prev">&#9664;</button>' +
+      '<button id="p_next">&#9654;</button>' +
+      '<label class="chk"><input id="p_bound" type="checkbox"> boundary</label>' +
+    '</div>' +
+    '<div class="meta" id="p_meta"></div>';
+  document.body.appendChild(wrap);
+
+  els = {
+    scrub: wrap.querySelector('#p_scrub'),
+    speed: wrap.querySelector('#p_speed'),
+    dens:  wrap.querySelector('#p_dens'),
+    smooth:wrap.querySelector('#p_smooth'),
+    play:  wrap.querySelector('#p_play'),
+    prev:  wrap.querySelector('#p_prev'),
+    next:  wrap.querySelector('#p_next'),
+    bound: wrap.querySelector('#p_bound'),
+    meta:  wrap.querySelector('#p_meta'),
+    vSpeed: wrap.querySelector('#p_speed_v'),
+    vDens:  wrap.querySelector('#p_dens_v'),
+    vSmooth:wrap.querySelector('#p_smooth_v')
+  };
+
+  els.scrub.addEventListener('input', e => window.seekFrame(+e.target.value));
+  els.speed.addEventListener('input', e => window.setParams({ ironSpeed: +e.target.value }));
+  els.dens .addEventListener('input', e => window.setParams({ wrinkleDensity: +e.target.value }));
+  els.smooth.addEventListener('input', e => window.setParams({ smoothMs: +e.target.value }));
+  els.bound.addEventListener('change', e => window.setParams({ showBoundary: e.target.checked }));
+  els.play.addEventListener('click', () => { playing ? window.pause() : window.play(); syncPanel(); });
+  els.prev.addEventListener('click', () => step(-1));
+  els.next.addEventListener('click', () => step(1));
+
+  window.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' && e.key !== ' ') return;
+    if (e.key === ' ') { e.preventDefault(); playing ? window.pause() : window.play(); syncPanel(); }
+    else if (e.key === 'ArrowLeft')  { e.preventDefault(); step(e.shiftKey ? -10 : -1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); step(e.shiftKey ?  10 :  1); }
+    else if (e.key === 'b') { els.bound.checked = !els.bound.checked; window.setParams({ showBoundary: els.bound.checked }); }
+  });
+
+  function step(d) {
+    const f = (Math.round(current * TOTAL_FRAMES) + d + TOTAL_FRAMES) % TOTAL_FRAMES;
+    window.seekFrame(f);
+  }
+}
+
+function row(id, label, min, max, stepv, val) {
+  return '<div class="row"><label for="' + id + '">' + label + '</label>' +
+         '<input id="' + id + '" type="range" min="' + min + '" max="' + max + '" step="' + stepv + '" value="' + val + '">' +
+         '<span class="val" id="' + id + '_v"></span></div>';
+}
+
+const PHASES = [
+  [0.0,  2.0, 'macro / push-in'],
+  [2.0,  3.0, 'descend + land'],
+  [3.0,  8.0, 'the pass'],
+  [8.0, 10.0, 'lift + pull back'],
+  [10.0, 12.01, 'rest / glow']
+];
+
+function syncPanel() {
+  if (!els) return;
+  const f = Math.round(current * TOTAL_FRAMES);
+  const t = current * DUR;
+  if (document.activeElement !== els.scrub) els.scrub.value = Math.min(TOTAL_FRAMES - 1, f);
+  els.vSpeed.textContent  = P.ironSpeed.toFixed(2) + '×';
+  els.vDens.textContent   = P.wrinkleDensity + '/M (' + WR.length + ')';
+  els.vSmooth.textContent = P.smoothMs + 'ms';
+  els.play.textContent = playing ? 'Pause' : 'Play';
+  let ph = '';
+  for (const p of PHASES) if (t >= p[0] && t < p[1]) ph = p[2];
+  els.meta.innerHTML =
+    'frame <b>' + String(Math.min(TOTAL_FRAMES - 1, f)).padStart(3, '0') + '</b>/' + TOTAL_FRAMES +
+    ' &nbsp; t=' + current.toFixed(4) + ' &nbsp; ' + t.toFixed(2) + 's' +
+    ' &nbsp; ' + lastMs.toFixed(0) + 'ms<br>' +
+    (lastQuads / 1000).toFixed(1) + 'k quads &nbsp; <span class="phase">' + ph + '</span>';
+}
+
+/* ------------------------------ bootstrap ------------------------------ */
+rebuild();
+if (DEBUG) buildPanel();
 render(0);
+syncPanel();
+epoch = performance.now();
+rafId = requestAnimationFrame(tick);
 window.ready = true;
 </script>
 </body>
