@@ -4,6 +4,10 @@ A self-contained, programmatically drawn product animation for Instagram
 Reels / TikTok: wrinkles vanishing from olive fabric as a compact handheld
 steam iron glides across it.
 
+Everything is drawn to a canvas, then printed through a simulated camera:
+a single low raking key through a silk, haze in the air, anamorphic
+defocus, halation, a filmic grade and 35mm grain.
+
 **1080 × 1920 · 30 fps · 12 s · 360 frames.** No images, no fonts, no
 frameworks, no build step. Two files do the work: `index.html` draws every
 frame to a `<canvas>`, `export.js` drives it frame by frame into an MP4.
@@ -167,12 +171,23 @@ local `(0,0)` sits on the cloth surface and the plate's bottom edge is
 whole 3–8 s pass and for the closing rest, so the plate cannot drift off
 the fabric plane.
 
-Selling that contact:
+It is lit rather than outlined. The shell carries a form shadow running
+away from the key, a broad highlight where the silk hits it, a warm bounce
+off the white card low on the left, and a silhouette that is bright where
+it turns into the light and dark where it turns away. The soleplate is
+brushed stainless: a top edge catching the key, a brushed grain, the cloth
+reflected in the polished lower face, and the shell's overhang dropping a
+hard occlusion onto it.
+
+Selling the contact:
 
 - a contact shadow drawn **on the cloth plane**, not on the iron, so it
   stays put as the iron rises — a broad ambient pool that spreads and
   lightens with height, plus a tight dark core that tightens as the plate
-  presses down;
+  presses down, fading out entirely once the iron is far above the cloth;
+- a **cast shadow** projected onto the cloth plane along the key. The sun
+  is low, so it runs long and soft away from the light and anchors the
+  product to the surface;
 - the mesh compresses under the plate — vertices pull in toward the plate
   centre by a few percent and settle slightly, and crease amplitude is
   damped there;
@@ -187,6 +202,49 @@ whole life is a function of `t`. Each is emitted from the contact point
 space as the iron moves on. Most escape ahead of the nose and the rest off
 the heel, so both rise clear of the body silhouette; each stretches and
 thins as it climbs, hot at the plate and cooling to warm white.
+
+---
+
+## The camera
+
+The scene is assembled in its own buffer and then printed through a
+camera, in this order.
+
+**Body.** Micro-drift and handheld micro-vibration — a few sines in `t`
+for translation, roll and a slow breathing zoom — applied as one transform
+when the scene buffer is composited, so everything moves together the way
+a real camera does. A 3.5% punch-in keeps the shake from exposing a frame
+edge.
+
+**Lens.** Only the plane the iron sits on is critically sharp. Three
+progressively softer layers are masked in by distance from that plane,
+with the near field falling off faster than the far field, as it does on a
+real lens. Each is blurred anamorphically — the image is squeezed
+vertically, blurred round, then unsqueezed — so the bokeh comes back
+taller than wide. A gentle oval edge falloff closes it out.
+
+**Light.** One large diffused key at a low angle, pooling on the surface
+behind the cloth and falling away with no bounce to lift it. A warm bounce
+card reads on the low left of the iron. The cloth's shading comes from the
+height-field gradient lit by that key, so the raking angle is what makes
+the creases read. During the first two seconds the key sweeps its azimuth
+263°→208°, raking across the creases.
+
+**Air.** Atmospheric haze, thickening toward the key, with the beams
+themselves catching in it.
+
+**Film.** Halation — the brightest values raised to the sixth power,
+tinted warm and bled back in at two radii. Then one pass over the frame
+with precomputed tables: a gentle S-curve with a lifted toe (no crushed
+blacks) and a soft shoulder, a split tone that cools and green-lifts the
+shadows while warming the highlights to amber, a mild desaturation, and
+35mm grain sampled in 2×2 blocks so it clumps rather than fizzes, weighted
+toward the midtones.
+
+The cloth also carries a woven micro-texture, pinned to the surface
+through the camera transform so it reads as fibre on a material rather
+than noise on the lens, and fading out as the threads drop below a couple
+of pixels.
 
 ---
 
@@ -214,9 +272,9 @@ no marks, no text — for a caption overlay added later.
 | charcoal outlines     | `#2B2B28` |
 | hot accent (steam, CTA) | `#E8513A` |
 
-Light is a soft warm morning rake from the upper left: a radial gradient on
-the background, a multiply/lighten wash on the cloth, a vignette and a
-faint deterministic grain over everything.
+The grade keeps those hues but treats them as film would: amber in the
+highlights, a cool green lift in the shadows, nothing crushed at either
+end.
 
 ---
 

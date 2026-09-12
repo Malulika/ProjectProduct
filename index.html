@@ -82,13 +82,13 @@ const W = 1080, H = 1920;
 const FPS = 30, DUR = 12, TOTAL_FRAMES = FPS * DUR;   // 360
 
 /* palette --------------------------------------------------------------- */
-const C_BG        = [242, 235, 221];   // #F2EBDD warm cream
+const C_BG        = [236, 228, 212];   // #F2EBDD warm cream, under key
 const C_BG_LIT    = [253, 248, 238];   // morning light
-const C_BG_DEEP   = [224, 212, 190];   // shaded cream
+const C_BG_DEEP   = [176, 167, 150];   // falls away from the key
 const C_FAB       = [107, 115,  72];   // #6B7348 olive
-const C_FAB_LIT   = [172, 181, 118];   // wrinkle highlight
-const C_FAB_DARK  = [ 49,  55,  29];   // wrinkle shadow
-const C_FAB_AO    = [ 37,  42,  24];   // crease occlusion
+const C_FAB_LIT   = [188, 194, 129];   // key-lit olive
+const C_FAB_DARK  = [ 28,  34,  23];   // unlit, no bounce spill   // wrinkle shadow
+const C_FAB_AO    = [ 19,  24,  15];   // crease occlusion
 const C_INK       = [ 43,  43,  40];   // #2B2B28 charcoal
 const C_HOT       = [232,  81,  58];   // #E8513A accent
 const C_SHELL     = [226, 218, 201];   // iron body
@@ -101,6 +101,15 @@ const rgb  = c => 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')';
 const rgba = (c, a) => 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')';
 
 /* ------------------------------- utilities ------------------------------ */
+const mkCan = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+
+/* every soft-focus, bloom and blur pass leans on ctx.filter */
+const CAN_BLUR = (function () {
+  const c = document.createElement('canvas').getContext('2d');
+  c.filter = 'blur(2px)';
+  return c.filter === 'blur(2px)';
+})();
+
 const clamp  = (v, a, b) => v < a ? a : v > b ? b : v;
 const clamp01 = v => v < 0 ? 0 : v > 1 ? 1 : v;
 const lerp   = (a, b, k) => a + (b - a) * k;
@@ -432,43 +441,34 @@ function pressInfl(x, y, iron) {
 function lightAt(t) {
   const k = smootherstep(seg(t, 0, 2.1));
   const az = lerp(263, 208, k) * Math.PI / 180;
-  const z  = lerp(0.40, 0.62, k);
+  const z  = lerp(0.26, 0.40, k);   // low sun: a raking key, not a toplight
   const hm = Math.sqrt(1 - z * z);
   return { x: Math.cos(az) * hm, y: Math.sin(az) * hm, z: z, rake: k };
 }
 
 /* ------ colour lookup table: shade/occlusion -> css colour string ------ */
 const LUT_S = 769, LUT_A = 11, LUT_SMAX = 1.25, LUT = new Array(LUT_S * LUT_A);
-/* soft staircase: flat plateaus with feathered edges -> vector-illustration
-   banding that still reads as depth rather than as contour lines */
-const BAND_STEPS = 4.0, BAND_SOFT = 0.44;
-function bandShade(s) {
-  const a = Math.abs(s);
-  const q = a * BAND_STEPS;
-  const f = Math.floor(q), fr = q - f;
-  const b = (f + smoothstep(0.5 - BAND_SOFT, 0.5 + BAND_SOFT, fr)) / BAND_STEPS;
-  /* band only the strong crease shading; the cloth's gentle drape stays
-     linear so flat areas never posterise into plateaus */
-  const w = smoothstep(0.11, 0.32, a);
-  const v = a * (1 - w) + b * w;
-  return s < 0 ? -v : v;
-}
+
+/* ------ colour lookup table: shade/occlusion -> css colour string ------ */
 (function buildLUT() {
   const mix = (a, b, k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
-  const SPEC = [214, 216, 172];
+  /* a broad, low-gloss sheen: woven cotton catches a raking key along the
+     fibre rather than returning a tight specular */
+  const SHEEN = [236, 231, 186];
   for (let si = 0; si < LUT_S; si++) {
-    const s = bandShade((si / (LUT_S - 1)) * 2 * LUT_SMAX - LUT_SMAX);
+    const s = (si / (LUT_S - 1)) * 2 * LUT_SMAX - LUT_SMAX;
     for (let ai = 0; ai < LUT_A; ai++) {
       const a = ai / (LUT_A - 1);
       let c;
       if (s > 0) {
-        const k = Math.min(1, s * 1.50);
+        const k = Math.min(1, s * 1.42);
         c = mix(C_FAB, C_FAB_LIT, k);
-        c = mix(c, SPEC, Math.pow(k, 4) * 0.16);          // faint sheen on lit flanks
+        c = mix(c, SHEEN, Math.pow(k, 2.6) * 0.42);
       } else {
-        c = mix(C_FAB, C_FAB_DARK, Math.min(1, -s * 1.15));
+        /* deep, unlit shadow side: no bounce spill, falls off fast */
+        c = mix(C_FAB, C_FAB_DARK, Math.min(1, Math.pow(-s * 1.30, 0.88)));
       }
-      c = mix(c, C_FAB_AO, a * 0.40);                     // crease occlusion
+      c = mix(c, C_FAB_AO, a * 0.52);                     // crease occlusion
       LUT[si * LUT_A + ai] = 'rgb(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ')';
     }
   }
@@ -553,7 +553,7 @@ function drawFabric(g, cam, iron, light) {
   }
 
   /* pass 2 — shade from the height gradient, then to screen space */
-  const Lx = light.x, Ly = light.y, Lz = light.z, G = 1.10;
+  const Lx = light.x, Ly = light.y, Lz = light.z, G = 1.34;
   const zc = cam.z, ox = W * 0.5 - cam.cx * zc, oy = H * 0.5 - cam.cy * zc;
   for (let j = 0; j <= rows; j++) {
     const row = j * stride;
@@ -594,61 +594,99 @@ function drawFabric(g, cam, iron, light) {
   }
 }
 
-/* ---------------- background: warm cream + morning light ---------------- */
-function drawBackground(ctx, cam, light) {
-  ctx.fillStyle = rgb(C_BG);
-  ctx.fillRect(0, 0, W, H);
-  const hx = W * (0.18 - 0.10 * light.x), hy = H * (0.04 - 0.06 * light.y);
-  let gr = ctx.createRadialGradient(hx, hy, 0, hx, hy, W * 1.45);
-  gr.addColorStop(0.00, rgba(C_BG_LIT, 1));
-  gr.addColorStop(0.42, rgba(C_BG, 0.55));
-  gr.addColorStop(1.00, rgba(C_BG_DEEP, 0.85));
-  ctx.fillStyle = gr;
-  ctx.fillRect(0, 0, W, H);
+/* ---- the room: a single key pools on the surface behind the cloth and
+   everything outside it falls away with no bounce to lift it ------------- */
+function drawBackground(g, cam, light) {
+  const hx = W * (0.17 - 0.13 * light.x), hy = H * (0.02 - 0.08 * light.y);
+  const edge = syOf(FAB.y0 - 6, cam);
+
+  g.fillStyle = 'rgb(31,30,27)';
+  g.fillRect(0, 0, W, H);
+
+  /* the surface recedes: brightest where it meets the cloth, falling off
+     upward into the unlit part of the room */
+  let vg = g.createLinearGradient(0, edge - 1250, 0, edge + 40);
+  vg.addColorStop(0.00, 'rgb(26,26,23)');
+  vg.addColorStop(0.44, 'rgb(58,54,47)');
+  vg.addColorStop(0.78, 'rgb(132,122,105)');
+  vg.addColorStop(1.00, 'rgb(190,177,154)');
+  g.fillStyle = vg;
+  g.fillRect(0, 0, W, Math.max(0, edge + 40));
+
+  /* the key's pool, soft-edged as a 6x6 silk makes it */
+  let gr = g.createRadialGradient(hx, hy, W * 0.05, hx, hy, W * 1.18);
+  gr.addColorStop(0.00, rgba(C_BG_LIT, 0.86));
+  gr.addColorStop(0.30, rgba(C_BG, 0.34));
+  gr.addColorStop(0.66, rgba(C_BG_DEEP, 0.08));
+  gr.addColorStop(1.00, 'rgba(180,168,148,0)');
+  g.fillStyle = gr;
+  g.fillRect(0, 0, W, Math.max(0, edge + 40));
 }
 
 /* ------------- macro lighting wash applied to the cloth only ------------ */
-function drawClothLight(ctx, cam, light) {
-  ctx.save();
-  fabricPath(ctx, cam);
-  ctx.clip();
+function drawClothLight(g, cam, light) {
+  g.save();
+  fabricPath(g, cam);
+  g.clip();
 
   const hx = W * (0.18 - 0.10 * light.x), hy = H * (0.04 - 0.06 * light.y);
 
-  ctx.globalCompositeOperation = 'multiply';
-  let lg = ctx.createLinearGradient(hx, hy, W * 1.05, H * 1.05);
+  g.globalCompositeOperation = 'multiply';
+  let lg = g.createLinearGradient(hx, hy, W * 1.05, H * 1.05);
   lg.addColorStop(0.00, 'rgb(255,253,246)');
   lg.addColorStop(0.45, 'rgb(244,239,227)');
   lg.addColorStop(1.00, 'rgb(203,192,164)');
-  ctx.fillStyle = lg;
-  ctx.globalAlpha = 0.85;
-  ctx.fillRect(0, 0, W, H);
+  g.fillStyle = lg;
+  g.globalAlpha = 0.85;
+  g.fillRect(0, 0, W, H);
 
-  ctx.globalCompositeOperation = 'source-over';
-  ctx.globalAlpha = 1;
-  let rg = ctx.createRadialGradient(hx, hy, 0, hx, hy, W * 1.15);
+  g.globalCompositeOperation = 'source-over';
+  g.globalAlpha = 1;
+  let rg = g.createRadialGradient(hx, hy, 0, hx, hy, W * 1.15);
   rg.addColorStop(0.00, 'rgba(255,247,226,0.26)');
   rg.addColorStop(0.55, 'rgba(255,244,219,0.07)');
   rg.addColorStop(1.00, 'rgba(255,244,219,0)');
-  ctx.fillStyle = rg;
-  ctx.fillRect(0, 0, W, H);
+  g.fillStyle = rg;
+  g.fillRect(0, 0, W, H);
 
-  ctx.restore();
+  g.restore();
 }
 
 /* ------------------- drape edge, seams and topstitching ----------------- */
-function drawClothDetail(ctx, cam, iron) {
+function drawClothDetail(g, cam, iron) {
   const z = cam.z;
 
-  /* the cloth's near edge, seated against the surface behind it */
-  fabricPath(ctx, cam);
-  ctx.lineJoin = 'round';
-  ctx.strokeStyle = rgba(C_INK, 0.055);
-  ctx.lineWidth = 30 * z;
-  ctx.stroke();
-  ctx.strokeStyle = rgba(C_INK, 0.88);
-  ctx.lineWidth = 2.7 * z;
-  ctx.stroke();
+  /* the cloth's near edge: it throws a contact shadow onto the surface
+     behind it and its rolled hem catches the key */
+  g.save();
+  fabricPath(g, cam);
+  g.clip();
+  g.restore();
+
+  fabricPath(g, cam);
+  g.lineJoin = 'round';
+  g.strokeStyle = 'rgba(18,17,14,0.30)';
+  g.lineWidth = 26 * z;
+  g.save();
+  if (CAN_BLUR) g.filter = 'blur(' + (7 * z).toFixed(1) + 'px)';
+  g.translate(2 * z, -7 * z);
+  g.stroke();
+  g.restore();
+
+  fabricPath(g, cam);
+  g.strokeStyle = 'rgba(24,26,18,0.55)';
+  g.lineWidth = 3.4 * z;
+  g.stroke();
+
+  g.save();
+  fabricPath(g, cam);
+  g.clip();
+  fabricPath(g, cam);
+  g.strokeStyle = 'rgba(226,226,190,0.50)';
+  g.lineWidth = 3.0 * z;
+  g.translate(0, 2.6 * z);
+  g.stroke();
+  g.restore();
 
   /* seams follow the displaced surface, so they buckle then straighten */
   const seams = [
@@ -663,24 +701,125 @@ function drawClothDetail(ctx, cam, iron) {
       const p = sm.kind === 'v' ? surfacePoint(sm.at, k, iron) : surfacePoint(k, sm.at, iron);
       pts.push([sxOf(p[0], cam), syOf(p[1], cam)]);
     }
-    ctx.beginPath();
-    ctx.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-    ctx.setLineDash([]);
-    ctx.strokeStyle = rgba(C_FAB_DARK, 0.45);
-    ctx.lineWidth = 2.4 * z;
-    ctx.stroke();
+    g.beginPath();
+    g.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]);
+    g.setLineDash([]);
+    g.strokeStyle = rgba(C_FAB_DARK, 0.45);
+    g.lineWidth = 2.4 * z;
+    g.stroke();
     /* topstitch alongside */
-    ctx.save();
-    ctx.translate(sm.kind === 'v' ? 7 * z : 0, sm.kind === 'v' ? 0 : 7 * z);
-    ctx.setLineDash([8 * z, 9 * z]);
-    ctx.lineDashOffset = 0;
-    ctx.strokeStyle = rgba(C_FAB_LIT, 0.34);
-    ctx.lineWidth = 1.7 * z;
-    ctx.stroke();
-    ctx.restore();
-    ctx.setLineDash([]);
+    g.save();
+    g.translate(sm.kind === 'v' ? 7 * z : 0, sm.kind === 'v' ? 0 : 7 * z);
+    g.setLineDash([8 * z, 9 * z]);
+    g.lineDashOffset = 0;
+    g.strokeStyle = rgba(C_FAB_LIT, 0.34);
+    g.lineWidth = 1.7 * z;
+    g.stroke();
+    g.restore();
+    g.setLineDash([]);
   }
+}
+
+/* ----------------------------------------------------------------------
+   Woven texture. A plain-weave tile is generated once and pinned to the
+   cloth through the camera transform, so it reads as fibre on a surface
+   rather than noise on the lens. It fades out as the camera pulls back
+   and the threads drop below a pixel or two.
+   ---------------------------------------------------------------------- */
+const WEAVE_PX = 8;                       // thread pitch in world px
+const WEAVE = (function () {
+  const S = WEAVE_PX * 2, c = mkCan(S, S), g = c.getContext('2d');
+  const rnd = mulberry32(SEED ^ 0x7f4a);
+  g.fillStyle = 'rgb(128,128,128)';
+  g.fillRect(0, 0, S, S);
+  /* warp and weft floats, each with a lit crown and a shaded flank */
+  for (let i = 0; i < 2; i++) {
+    for (let j = 0; j < 2; j++) {
+      const x = i * WEAVE_PX, y = j * WEAVE_PX;
+      const warpOnTop = (i + j) % 2 === 0;
+      const gr = warpOnTop
+        ? g.createLinearGradient(x, 0, x + WEAVE_PX, 0)
+        : g.createLinearGradient(0, y, 0, y + WEAVE_PX);
+      const n = 15 + rnd() * 18;
+      gr.addColorStop(0.00, 'rgb(' + (128 - n) + ',' + (128 - n) + ',' + (128 - n) + ')');
+      gr.addColorStop(0.38, 'rgb(' + (128 + n) + ',' + (128 + n) + ',' + (128 + n) + ')');
+      gr.addColorStop(1.00, 'rgb(' + (128 - n * 0.8 | 0) + ',' + (128 - n * 0.8 | 0) + ',' + (128 - n * 0.8 | 0) + ')');
+      g.fillStyle = gr;
+      g.fillRect(x, y, WEAVE_PX, WEAVE_PX);
+    }
+  }
+  return c;
+})();
+let WEAVE_PAT = null;
+
+function drawWeave(g, cam) {
+  const px = WEAVE_PX * cam.z;
+  const vis = smoothstep(2.2, 4.6, px);                   // gone once threads go sub-pixel
+  if (vis <= 0.01) return;
+  if (!WEAVE_PAT) WEAVE_PAT = g.createPattern(WEAVE, 'repeat');
+  g.save();
+  fabricPath(g, cam);
+  g.clip();
+  g.globalCompositeOperation = 'soft-light';
+  g.globalAlpha = 0.34 * vis;
+  /* pin the weave to the cloth, not to the frame */
+  const m = new DOMMatrix()
+    .translate(W * 0.5 - cam.cx * cam.z, H * 0.5 - cam.cy * cam.z)
+    .scale(cam.z, cam.z);
+  WEAVE_PAT.setTransform(m);
+  g.fillStyle = WEAVE_PAT;
+  g.fillRect(0, 0, W, H);
+  g.restore();
+}
+
+/* ----------------------------------------------------------------------
+   Shadow the iron throws across the cloth. The key is low, so the shadow
+   runs long and soft away from it and anchors the product to the surface.
+   ---------------------------------------------------------------------- */
+function drawCastShadow(g, cam, iron, light) {
+  if (!iron.vis) return;
+  const fade = 1 - smoothstep(120, 640, iron.lift);
+  if (fade <= 0.01) return;
+
+  const s = cam.z * IRON_S;
+  /* direction the light pushes the shadow, and how long a low sun makes it */
+  const len = clamp(0.78 / Math.max(0.2, light.z), 1.0, 2.6);
+  const dirx = -light.x, diry = -light.y;
+
+  tctx.setTransform(1, 0, 0, 1, 0, 0);
+  tctx.globalCompositeOperation = 'source-over';
+  tctx.clearRect(0, 0, W, H);
+  tctx.save();
+  tctx.translate(sxOf(iron.x, cam), syOf(iron.cy, cam) + iron.lift * cam.z * 0.10);
+  /* flatten onto the cloth plane and shear along the light */
+  tctx.transform(1, 0, -dirx * len, -diry * len * 0.62, 0, 0);
+  tctx.scale(s, s);
+  tctx.fillStyle = 'rgb(0,0,0)';
+  platePath(tctx); tctx.fill();
+  bodyPath(tctx); tctx.fill();
+  gripPath(tctx);
+  tctx.lineWidth = 40; tctx.lineCap = 'round'; tctx.lineJoin = 'round';
+  tctx.strokeStyle = 'rgb(0,0,0)'; tctx.stroke();
+  tctx.restore();
+
+  /* the further from contact, the softer and weaker the edge */
+  tctx.globalCompositeOperation = 'destination-in';
+  const gx = sxOf(iron.x, cam), gy = syOf(iron.cy, cam);
+  const gr = tctx.createLinearGradient(gx, gy, gx + dirx * 760 * cam.z, gy + diry * 470 * cam.z);
+  gr.addColorStop(0.00, 'rgba(0,0,0,1)');
+  gr.addColorStop(0.32, 'rgba(0,0,0,0.74)');
+  gr.addColorStop(0.72, 'rgba(0,0,0,0.26)');
+  gr.addColorStop(1.00, 'rgba(0,0,0,0)');
+  tctx.fillStyle = gr;
+  tctx.fillRect(0, 0, W, H);
+  tctx.globalCompositeOperation = 'source-over';
+
+  g.save();
+  g.globalAlpha = 0.68 * fade;
+  if (CAN_BLUR) g.filter = 'blur(' + (10 * cam.z).toFixed(1) + 'px)';
+  g.drawImage(tcan, 0, 0);
+  g.restore();
 }
 
 /* ======================================================================
@@ -725,6 +864,9 @@ function gripPath(g) {
   g.bezierCurveTo(GRIP[2], GRIP[3], GRIP[4], GRIP[5], GRIP[6], GRIP[7]);
 }
 
+/* Lit as a real object rather than outlined: form shadow, key highlight,
+   bounce fill and a rim, with the silhouette darkened only on the side
+   turned away from the key. */
 function drawIron(g, cam, iron, t) {
   const s = cam.z * IRON_S;
 
@@ -735,97 +877,163 @@ function drawIron(g, cam, iron, t) {
   g.lineJoin = 'round';
   g.lineCap = 'round';
 
-  /* ---- soleplate ---------------------------------------------------- */
-  let mg = g.createLinearGradient(0, -36, 0, 0);
-  mg.addColorStop(0.00, 'rgb(223,220,210)');
-  mg.addColorStop(0.42, rgb(C_METAL));
-  mg.addColorStop(1.00, rgb(C_METAL_DK));
-  platePath(g); g.fillStyle = mg; g.fill();
-  platePath(g); g.strokeStyle = rgb(C_INK); g.lineWidth = 4.2; g.stroke();
-
-  /* contact edge and steam vents on the plate bevel */
-  g.beginPath();
-  g.moveTo(-108, -3); g.lineTo(130, -3);
-  g.strokeStyle = 'rgba(43,43,40,0.30)'; g.lineWidth = 3; g.stroke();
-  g.fillStyle = 'rgba(43,43,40,0.46)';
-  for (let i = 0; i < 6; i++) {
-    g.beginPath();
-    g.ellipse(-58 + i * 33, -11, 5.6, 2.6, 0, 0, Math.PI * 2);
-    g.fill();
+  /* ---- soleplate: brushed stainless -------------------------------- */
+  g.save();
+  platePath(g); g.clip();
+  let mg = g.createLinearGradient(0, -38, 0, 0);
+  mg.addColorStop(0.00, 'rgb(214,211,202)');       // top edge catches the key
+  mg.addColorStop(0.26, 'rgb(176,174,166)');
+  mg.addColorStop(0.70, 'rgb(124,125,117)');
+  mg.addColorStop(1.00, 'rgb(82,86,76)');          // turns under, picks up the cloth
+  g.fillStyle = mg; g.fillRect(-160, -44, 360, 52);
+  /* the cloth reflected in the lower half of the polished face */
+  let rf = g.createLinearGradient(0, -20, 0, 0);
+  rf.addColorStop(0, 'rgba(112,120,78,0)');
+  rf.addColorStop(1, 'rgba(112,120,78,0.55)');
+  g.fillStyle = rf; g.fillRect(-160, -22, 360, 24);
+  /* brushed grain */
+  g.globalAlpha = 0.16;
+  const brnd = mulberry32(SEED ^ 0x2b1d);
+  for (let i = 0; i < 46; i++) {
+    const y = -36 + brnd() * 34;
+    g.fillStyle = brnd() < 0.5 ? 'rgb(255,255,255)' : 'rgb(60,62,56)';
+    g.fillRect(-150 + brnd() * 60, y, 90 + brnd() * 210, 0.7);
   }
+  g.globalAlpha = 1;
+  /* specular skimming the top edge */
+  let sp = g.createLinearGradient(-140, 0, 190, 0);
+  sp.addColorStop(0.00, 'rgba(255,255,255,0)');
+  sp.addColorStop(0.34, 'rgba(255,252,244,0.85)');
+  sp.addColorStop(0.68, 'rgba(255,252,244,0.30)');
+  sp.addColorStop(1.00, 'rgba(255,255,255,0)');
+  g.fillStyle = sp; g.fillRect(-150, -39, 340, 4.5);
+  /* the shell overhangs the plate and drops a hard occlusion onto it */
+  let ov = g.createLinearGradient(0, -38, 0, -18);
+  ov.addColorStop(0.00, 'rgba(26,28,22,0.62)');
+  ov.addColorStop(1.00, 'rgba(26,28,22,0)');
+  g.fillStyle = ov; g.fillRect(-160, -38, 340, 22);
+  g.restore();
 
-  /* ---- body shell --------------------------------------------------- */
-  let bg = g.createLinearGradient(-100, -186, 130, -30);
-  bg.addColorStop(0.00, 'rgb(242,236,224)');
-  bg.addColorStop(0.46, rgb(C_SHELL));
-  bg.addColorStop(1.00, rgb(C_SHELL_DK));
-  bodyPath(g); g.fillStyle = bg; g.fill();
+  /* steam vents, each with a lit lower lip */
+  for (let i = 0; i < 6; i++) {
+    const vx = -58 + i * 33;
+    g.beginPath(); g.ellipse(vx, -11, 5.6, 2.6, 0, 0, Math.PI * 2);
+    g.fillStyle = 'rgba(28,30,26,0.72)'; g.fill();
+    g.beginPath(); g.ellipse(vx, -8.6, 5.0, 1.5, 0, 0, Math.PI * 2);
+    g.fillStyle = 'rgba(255,255,255,0.24)'; g.fill();
+  }
+  /* the contact edge itself sits in its own occlusion */
+  let ce = g.createLinearGradient(0, -6, 0, 0);
+  ce.addColorStop(0, 'rgba(34,36,28,0)');
+  ce.addColorStop(1, 'rgba(34,36,28,0.55)');
+  g.save(); platePath(g); g.clip();
+  g.fillStyle = ce; g.fillRect(-160, -7, 360, 8);
+  g.restore();
 
+  /* ---- body shell: soft-touch plastic ------------------------------- */
   g.save();
   bodyPath(g); g.clip();
 
-  /* soft highlight raking across the shell */
-  g.save();
-  g.translate(-30, -128); g.rotate(-0.30);
-  g.beginPath(); g.ellipse(0, 0, 86, 25, 0, 0, Math.PI * 2);
-  g.fillStyle = 'rgba(255,255,252,0.40)'; g.fill();
-  g.restore();
+  let bg = g.createLinearGradient(-118, -196, 132, -24);
+  bg.addColorStop(0.00, 'rgb(243,238,228)');
+  bg.addColorStop(0.34, 'rgb(222,215,200)');
+  bg.addColorStop(0.70, 'rgb(160,153,138)');
+  bg.addColorStop(1.00, 'rgb(101,97,86)');         // form shadow, unlit side
+  g.fillStyle = bg; g.fillRect(-160, -240, 340, 230);
 
-  /* water-level window at the heel */
+  /* broad key highlight from the silk, low and raking */
+  let hl = g.createRadialGradient(-46, -158, 6, -30, -140, 168);
+  hl.addColorStop(0.00, 'rgba(255,253,246,0.90)');
+  hl.addColorStop(0.45, 'rgba(255,252,243,0.34)');
+  hl.addColorStop(1.00, 'rgba(255,252,243,0)');
+  g.fillStyle = hl; g.fillRect(-160, -240, 340, 230);
+
+  /* warm bounce off the white card, low and to the left */
+  let bo = g.createLinearGradient(-140, -30, -40, -120);
+  bo.addColorStop(0.00, 'rgba(255,226,186,0.34)');
+  bo.addColorStop(1.00, 'rgba(255,226,186,0)');
+  g.fillStyle = bo; g.fillRect(-160, -240, 340, 230);
+
+  /* water-level window */
   g.save();
   g.translate(-108, -104); g.rotate(-0.08);
   g.beginPath(); g.roundRect(-13, -32, 26, 64, 13);
-  g.fillStyle = 'rgba(224,220,206,0.9)'; g.fill();
-  g.strokeStyle = 'rgba(43,43,40,0.26)'; g.lineWidth = 2.6; g.stroke();
+  g.fillStyle = 'rgba(206,202,188,0.9)'; g.fill();
+  g.strokeStyle = 'rgba(40,42,34,0.30)'; g.lineWidth = 2.2; g.stroke();
   g.beginPath(); g.roundRect(-8, 2, 16, 26, 8);
-  g.fillStyle = 'rgba(172,180,160,0.8)'; g.fill();
+  g.fillStyle = 'rgba(150,160,138,0.8)'; g.fill();
+  g.beginPath(); g.roundRect(-9, -27, 5, 40, 3);
+  g.fillStyle = 'rgba(255,255,255,0.45)'; g.fill();
   g.restore();
 
   /* hot accent band wrapping the heel */
   g.beginPath();
   g.moveTo(-137, -74);
   g.bezierCurveTo(-141, -96, -142, -112, -141, -126);
-  g.strokeStyle = rgba(C_HOT, 0.95); g.lineWidth = 15; g.stroke();
+  g.strokeStyle = rgba(C_HOT, 0.92); g.lineWidth = 15; g.stroke();
 
-  /* shoulder seam and the shaded skirt where the shell meets the plate */
+  /* moulding seam, and the shaded skirt meeting the plate */
   g.beginPath();
-  g.moveTo(-138, -120); g.bezierCurveTo(-86, -128, -4, -108, 88, -62);
-  g.strokeStyle = 'rgba(43,43,40,0.24)'; g.lineWidth = 3; g.stroke();
-  let sg = g.createLinearGradient(0, -62, 0, -22);
-  sg.addColorStop(0, 'rgba(43,43,40,0)');
-  sg.addColorStop(1, 'rgba(43,43,40,0.30)');
-  g.fillStyle = sg; g.fillRect(-150, -62, 320, 42);
+  g.moveTo(-135, -118); g.bezierCurveTo(-88, -126, -8, -108, 72, -76);
+  g.strokeStyle = 'rgba(46,48,38,0.20)'; g.lineWidth = 2.6; g.stroke();
+  g.strokeStyle = 'rgba(255,255,255,0.20)'; g.lineWidth = 1.6;
+  g.beginPath();
+  g.moveTo(-135, -121); g.bezierCurveTo(-88, -129, -8, -111, 72, -79);
+  g.stroke();
+  let sg = g.createLinearGradient(0, -66, 0, -22);
+  sg.addColorStop(0, 'rgba(38,40,32,0)');
+  sg.addColorStop(1, 'rgba(38,40,32,0.42)');
+  g.fillStyle = sg; g.fillRect(-155, -66, 320, 46);
   g.restore();
 
-  bodyPath(g); g.strokeStyle = rgb(C_INK); g.lineWidth = 4.4; g.stroke();
+  /* silhouette: bright where it turns into the key, dark where it turns away */
+  let eg = g.createLinearGradient(-120, -190, 130, -30);
+  eg.addColorStop(0.00, 'rgba(255,255,250,0.42)');
+  eg.addColorStop(0.34, 'rgba(90,92,80,0.12)');
+  eg.addColorStop(1.00, 'rgba(44,46,38,0.62)');
+  bodyPath(g); g.strokeStyle = eg; g.lineWidth = 2.6; g.stroke();
 
-  /* ---- digital display on the forward slope ------------------------- */
+  /* ---- digital display ---------------------------------------------- */
   g.save();
   g.translate(70, -124); g.rotate(-0.54);
   const dw = 45, dh = 25;
   const glow = 0.58 + 0.42 * Math.sin(t * 2.1);
   g.beginPath(); g.roundRect(-dw / 2, -dh / 2, dw, dh, 7);
-  g.fillStyle = 'rgb(30,30,26)'; g.fill();
+  g.fillStyle = 'rgb(26,26,23)'; g.fill();
   g.save(); g.beginPath(); g.roundRect(-dw / 2, -dh / 2, dw, dh, 7); g.clip();
   const dg = g.createRadialGradient(0, 2, 0, 0, 2, dw * 0.85);
-  dg.addColorStop(0, rgba(C_HOT, 0.60 * glow));
+  dg.addColorStop(0, rgba(C_HOT, 0.62 * glow));
   dg.addColorStop(1, rgba(C_HOT, 0));
   g.fillStyle = dg; g.fillRect(-dw, -dh, dw * 2, dh * 2);
   g.fillStyle = rgba(C_HOT, 0.95);
   for (let i = 0; i < 3; i++) g.fillRect(-14 + i * 10, -2 - i * 2.2, 5.5, 5 + i * 2.2);
+  /* glass: a hard glint across the cover */
+  let gl = g.createLinearGradient(-dw / 2, -dh / 2, dw / 2, dh / 2);
+  gl.addColorStop(0.00, 'rgba(255,255,255,0.30)');
+  gl.addColorStop(0.38, 'rgba(255,255,255,0.05)');
+  gl.addColorStop(1.00, 'rgba(255,255,255,0)');
+  g.fillStyle = gl; g.fillRect(-dw, -dh, dw * 2, dh * 2);
   g.restore();
   g.beginPath(); g.roundRect(-dw / 2, -dh / 2, dw, dh, 7);
-  g.strokeStyle = rgb(C_INK); g.lineWidth = 3.2; g.stroke();
+  g.strokeStyle = 'rgba(52,54,44,0.75)'; g.lineWidth = 2.4; g.stroke();
   g.restore();
 
-  /* ---- grip --------------------------------------------------------- */
-  gripPath(g); g.strokeStyle = rgb(C_INK); g.lineWidth = 38; g.stroke();
-  gripPath(g); g.strokeStyle = rgb(C_GRIP); g.lineWidth = 30; g.stroke();
+  /* ---- grip: matte rubber ------------------------------------------- */
+  gripPath(g); g.strokeStyle = 'rgb(46,46,41)'; g.lineWidth = 37; g.stroke();
+  g.save();
+  gripPath(g); g.lineWidth = 37; g.strokeStyle = 'rgb(0,0,0)';
+  /* broad soft highlight along the crown */
   g.beginPath();
-  g.moveTo(-104, -166);
-  g.bezierCurveTo(-86, -234, -2, -236, 50, -168);
-  g.strokeStyle = 'rgba(240,234,219,0.22)'; g.lineWidth = 6; g.stroke();
-  g.strokeStyle = 'rgba(18,18,15,0.36)'; g.lineWidth = 4;
+  g.moveTo(-104, -168);
+  g.bezierCurveTo(-86, -236, -2, -238, 50, -170);
+  g.strokeStyle = 'rgba(216,212,198,0.30)'; g.lineWidth = 9; g.stroke();
+  g.beginPath();
+  g.moveTo(-102, -160);
+  g.bezierCurveTo(-84, -226, -4, -228, 48, -162);
+  g.strokeStyle = 'rgba(180,178,166,0.16)'; g.lineWidth = 17; g.stroke();
+  g.restore();
+  /* finger recesses */
+  g.strokeStyle = 'rgba(16,16,14,0.45)'; g.lineWidth = 4;
   for (let i = 0; i < 3; i++) {
     const p = cubicPt(GRIP[0], GRIP[1], GRIP[2], GRIP[3], GRIP[4], GRIP[5], GRIP[6], GRIP[7], 0.30 + i * 0.20);
     g.beginPath();
@@ -836,7 +1044,7 @@ function drawIron(g, cam, iron, t) {
   g.beginPath();
   g.moveTo(-44, -202); g.lineTo(-18, -204); g.lineTo(-31, -189);
   g.closePath();
-  g.fillStyle = rgba(C_HOT, 0.9); g.fill();
+  g.fillStyle = rgba(C_HOT, 0.88); g.fill();
 
   g.restore();
 }
@@ -905,15 +1113,14 @@ function drawContactShadow(g, cam, iron) {
    point AS IT WAS at its birth time, so the trail is left behind in
    world space as the iron moves on.
    ====================================================================== */
-const STEAM_RATE = 28, STEAM_LIFE = 1.25;
+const STEAM_RATE = 34, STEAM_LIFE = 1.35;
 const T_STEAM_ON = 2.88, T_STEAM_OFF = 8.02;
 const REST_RATE = 2.6, T_REST_ON = 10.60;
 
 /* pre-rendered soft puff sprite, drawn stretched so each wisp reads as a
    rising streak rather than a dot */
 function puffSprite(col) {
-  const S = 128, c = document.createElement('canvas');
-  c.width = c.height = S;
+  const S = 128, c = mkCan(S, S);
   const g = c.getContext('2d');
   const gr = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
   gr.addColorStop(0.00, rgba(col, 1));
@@ -922,7 +1129,7 @@ function puffSprite(col) {
   g.fillStyle = gr; g.fillRect(0, 0, S, S);
   return c;
 }
-const PUFF_WARM = puffSprite([253, 248, 236]);
+const PUFF_WARM = puffSprite([255, 250, 238]);
 const PUFF_HOT  = puffSprite(C_HOT);
 
 function wispOf(i, seed) {
@@ -966,19 +1173,19 @@ function drawSteam(g, cam, t) {
       const wy = born.cy - 14 - rise;
 
       const fade = smoothstep(0, 0.12, k) * Math.pow(1 - smoothstep(0.28, 0.94, k), 1.4);
-      const rad = (15 + 26 * k) * wp.sz * z;
+      const rad = (17 + 34 * k) * wp.sz * z;
       const sX = sxOf(wx, cam), sY = syOf(wy, cam);
       const rw = rad * 0.58, rh = rad * (1.55 + 1.5 * k);  // stretches as it dissipates
       if (sX + rw < 0 || sX - rw > W || sY + rh < 0 || sY - rh > H) continue;
 
-      g.globalAlpha = 0.52 * fade * B.amp;
+      g.globalAlpha = 0.74 * fade * B.amp;
       g.drawImage(PUFF_WARM, sX - rw, sY - rh, rw * 2, rh * 2);
 
       /* hot at the plate, cooling to warm white as it climbs */
       const hot = Math.max(0, 1 - k * 3.4);
       if (hot > 0.01) {
         g.globalCompositeOperation = 'lighter';
-        g.globalAlpha = 0.30 * fade * hot * B.amp;
+        g.globalAlpha = 0.40 * fade * hot * B.amp;
         g.drawImage(PUFF_HOT, sX - rw * 0.8, sY - rh * 0.7, rw * 1.6, rh * 1.4);
         g.globalCompositeOperation = 'source-over';
       }
@@ -989,22 +1196,246 @@ function drawSteam(g, cam, t) {
 }
 
 /* ======================================================================
-   10. FINISHING PASSES
+   10. CAMERA BODY  —  micro-drift and handheld micro-vibration
+   ----------------------------------------------------------------------
+   Applied as a transform when the scene buffer is composited, so it moves
+   everything together the way a real camera does. A small punch-in keeps
+   the shake from ever exposing a frame edge.
    ====================================================================== */
-/* deterministic paper grain, generated once */
-const GRAIN = (function () {
-  const S = 220, c = document.createElement('canvas');
-  c.width = c.height = S;
-  const g = c.getContext('2d'), im = g.createImageData(S, S), d = im.data;
-  const rnd = mulberry32(SEED ^ 0x5f3a);
-  for (let i = 0; i < d.length; i += 4) {
-    const v = 118 + (rnd() - 0.5) * 150;
-    d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
+const PUNCH = 1.035;
+
+function shakeAt(t) {
+  return {
+    dx: 4.4 * Math.sin(t * 0.47 + 1.13) + 2.0 * Math.sin(t * 1.19 + 2.71)
+      + 0.8 * Math.sin(t * 2.97 + 0.41) + 0.34 * Math.sin(t * 6.31 + 4.02),
+    dy: 5.6 * Math.sin(t * 0.39 + 3.31) + 2.3 * Math.sin(t * 0.97 + 0.83)
+      + 0.9 * Math.sin(t * 3.41 + 2.17) + 0.30 * Math.sin(t * 7.13 + 1.55),
+    rot: 0.00150 * Math.sin(t * 0.31 + 2.04) + 0.00062 * Math.sin(t * 1.07 + 1.41)
+       + 0.00026 * Math.sin(t * 2.69 + 0.93),
+    zm: 1 + 0.0024 * Math.sin(t * 0.43 + 0.61)
+  };
+}
+
+/* ======================================================================
+   11. LENS  —  anamorphic defocus, halation, edge falloff
+   ====================================================================== */
+const ANA = 0.62;                            // bokeh comes back 1/ANA taller than wide
+const acan = mkCan(W, Math.round(H * ANA)), actx = acan.getContext('2d');
+const tcan = mkCan(W, H), tctx = tcan.getContext('2d');
+const BW = W >> 2, BH = H >> 2;
+const b1can = mkCan(BW, BH), b1ctx = b1can.getContext('2d');
+const b2can = mkCan(BW, BH), b2ctx = b2can.getContext('2d');
+
+/* squeeze vertically, blur round, unsqueeze -> oval (anamorphic) bokeh */
+function anisoBlur(dst, src, r) {
+  actx.clearRect(0, 0, acan.width, acan.height);
+  actx.drawImage(src, 0, 0, W, H, 0, 0, W, acan.height);
+  dst.save();
+  if (CAN_BLUR) dst.filter = 'blur(' + r.toFixed(2) + 'px)';
+  dst.drawImage(acan, 0, 0, W, acan.height, 0, 0, W, H);
+  dst.restore();
+}
+
+/* T2.0 on a long lens: only the plane the iron sits on is critically
+   sharp, everything nearer and further falls away. The near field goes
+   soft faster than the far field, as it does on a real lens. */
+const DOF = [
+  { r:  4.0, start: 300, full:  760 },
+  { r: 10.0, start: 760, full: 1250 },
+  { r: 20.0, start: 1250, full: 1900 }
+];
+const DOF_NEAR = 0.80;                       // near side falls off this much faster
+
+function dofMask(g, focusY, start, full) {
+  const gr = g.createLinearGradient(0, 0, 0, H);
+  const stops = [
+    [focusY - full, 1], [focusY - start, 0],
+    [focusY + start * DOF_NEAR, 0], [focusY + full * DOF_NEAR, 1]
+  ];
+  let last = -1;
+  for (const [y, a] of stops) {
+    let p = clamp01(y / H);
+    if (p <= last) p = Math.min(1, last + 1e-4);
+    last = p;
+    gr.addColorStop(p, 'rgba(0,0,0,' + a + ')');
   }
-  g.putImageData(im, 0, 0);
-  return c;
+  return gr;
+}
+
+function compositeCloth(dst, src, cam, focusY) {
+  dst.drawImage(src, 0, 0);
+
+  for (let i = 0; i < DOF.length; i++) {
+    const L = DOF[i];
+    tctx.globalCompositeOperation = 'source-over';
+    tctx.clearRect(0, 0, W, H);
+    anisoBlur(tctx, src, L.r * cam.z);
+    tctx.globalCompositeOperation = 'destination-in';
+    tctx.fillStyle = dofMask(tctx, focusY, L.start * cam.z, L.full * cam.z);
+    tctx.fillRect(0, 0, W, H);
+    tctx.globalCompositeOperation = 'source-over';
+    dst.drawImage(tcan, 0, 0);
+  }
+}
+
+/* halation: the brightest values bleed into the emulsion, warm and soft */
+function halation(g, src) {
+  b1ctx.globalCompositeOperation = 'source-over';
+  b1ctx.clearRect(0, 0, BW, BH);
+  b1ctx.drawImage(src, 0, 0, W, H, 0, 0, BW, BH);
+  b2ctx.clearRect(0, 0, BW, BH);
+  b2ctx.drawImage(b1can, 0, 0);
+  b1ctx.globalCompositeOperation = 'multiply';
+  for (let i = 0; i < 5; i++) b1ctx.drawImage(b2can, 0, 0);   // ^6: only real highlights survive
+  b1ctx.fillStyle = 'rgb(255,146,104)';
+  b1ctx.fillRect(0, 0, BW, BH);
+  b1ctx.globalCompositeOperation = 'source-over';
+
+  g.save();
+  g.globalCompositeOperation = 'lighter';
+  if (CAN_BLUR) g.filter = 'blur(22px)';
+  g.globalAlpha = 0.26;
+  g.drawImage(b1can, 0, 0, BW, BH, 0, 0, W, H);
+  g.globalAlpha = 0.16;
+  if (CAN_BLUR) g.filter = 'blur(62px)';
+  g.drawImage(b1can, 0, 0, BW, BH, 0, 0, W, H);
+  g.restore();
+}
+
+/* gentle oval edge falloff */
+function edgeFalloff(g) {
+  g.save();
+  g.globalCompositeOperation = 'multiply';
+  g.translate(W * 0.5, H * 0.5);
+  g.scale(1, H / W * 0.80);
+  const r = W * 0.80;
+  const gr = g.createRadialGradient(0, -W * 0.10, r * 0.30, 0, 0, r);
+  gr.addColorStop(0.00, 'rgb(255,255,255)');
+  gr.addColorStop(0.58, 'rgb(238,236,232)');
+  gr.addColorStop(1.00, 'rgb(150,152,156)');
+  g.fillStyle = gr;
+  g.fillRect(-W, -H, W * 2, H * 2);
+  g.restore();
+}
+
+/* ======================================================================
+   12. ATMOSPHERE  —  haze in the air, and the key catching it
+   ====================================================================== */
+function drawHaze(g, cam, light, t) {
+  const hx = W * (0.16 - 0.13 * light.x), hy = H * (0.01 - 0.07 * light.y);
+
+  g.save();
+  g.globalCompositeOperation = 'lighter';
+
+  /* the beams themselves, running along the key */
+  const ang = Math.atan2(-light.y, -light.x);
+  g.translate(hx, hy);
+  g.rotate(ang);
+  const BEAM = [
+    [-190, 152, 0.026], [30, 104, 0.021], [225, 190, 0.018],
+    [470, 128, 0.014], [700, 230, 0.011]
+  ];
+  for (let i = 0; i < BEAM.length; i++) {
+    const off = BEAM[i][0] + 26 * Math.sin(t * 0.23 + i * 1.7);
+    const wdt = BEAM[i][1];
+    const a = BEAM[i][2] * (0.75 + 0.25 * Math.sin(t * 0.31 + i * 2.3));
+    const gr = g.createLinearGradient(0, off - wdt, 0, off + wdt);
+    gr.addColorStop(0.00, 'rgba(255,232,196,0)');
+    gr.addColorStop(0.50, 'rgba(255,232,196,' + a.toFixed(4) + ')');
+    gr.addColorStop(1.00, 'rgba(255,232,196,0)');
+    g.fillStyle = gr;
+    g.fillRect(0, off - wdt, 2600, wdt * 2);
+  }
+  g.restore();
+
+  /* the haze itself: an airy lift that thickens toward the key */
+  g.save();
+  g.globalCompositeOperation = 'lighter';
+  const gr = g.createRadialGradient(hx, hy, 0, hx, hy, W * 1.55);
+  gr.addColorStop(0.00, 'rgba(255,228,186,0.070)');
+  gr.addColorStop(0.42, 'rgba(255,224,182,0.026)');
+  gr.addColorStop(1.00, 'rgba(255,224,182,0)');
+  g.fillStyle = gr;
+  g.fillRect(0, 0, W, H);
+  g.restore();
+}
+
+/* ======================================================================
+   13. FILM  —  S-curve, split tone, 35mm grain
+   ----------------------------------------------------------------------
+   One pass over the frame with precomputed tables: tone curve per
+   channel, split-tone offset and grain amplitude indexed by luminance.
+   ====================================================================== */
+const CR = new Int16Array(256), CG = new Int16Array(256), CB = new Int16Array(256);
+const AR = new Int16Array(256), AG = new Int16Array(256), AB = new Int16Array(256);
+const LR = new Int32Array(256), LG = new Int32Array(256), LB = new Int32Array(256);
+const GA = new Int16Array(256);
+const DESAT = 44;                            // /256 — muted, not washed out
+
+(function buildFilm() {
+  for (let v = 0; v < 256; v++) {
+    let x = v / 255;
+    const sc = x * x * (3 - 2 * x);
+    x = x + (sc - x) * 0.52;                 // gentle S
+    x = 0.026 + x * 0.958;                   // lifted toe: no crushed blacks
+    x = x * (1 + 0.16 * x) / (1 + 0.26 * x); // soft shoulder
+    const c = Math.round(clamp01(x) * 255);
+    /* channel response: red holds a touch more, blue rolls off sooner */
+    CR[v] = clamp(Math.round(c * 1.012 + 1), 0, 255);
+    CG[v] = clamp(Math.round(c * 1.000), 0, 255);
+    CB[v] = clamp(Math.round(c * 0.974 + 2), 0, 255);
+
+    LR[v] = Math.round(v * 0.2126 * 256);
+    LG[v] = Math.round(v * 0.7152 * 256);
+    LB[v] = Math.round(v * 0.0722 * 256);
+  }
+  for (let L = 0; L < 256; L++) {
+    const sh = 1 - smoothstep(6, 118, L);    // shadows: cool, green-lifted
+    const hi = smoothstep(128, 252, L);      // highlights: warm amber
+    AR[L] = Math.round(-5.5 * sh + 10.5 * hi);
+    AG[L] = Math.round(7.5 * sh + 4.0 * hi);
+    AB[L] = Math.round(6.0 * sh - 7.5 * hi);
+    const x = L / 255;
+    GA[L] = Math.round(23 * Math.pow(clamp01(4 * x * (1 - x)), 0.62) + 3);
+  }
 })();
-let GRAIN_PAT = null;
+
+/* deterministic grain field, sampled in 2x2 blocks so it clumps like film */
+const NBITS = 20, NSIZE = 1 << NBITS, NMASK = NSIZE - 1;
+const NOISE = (function () {
+  const n = new Int8Array(NSIZE);
+  const rnd = mulberry32(SEED ^ 0x9e3779b9);
+  for (let i = 0; i < NSIZE; i++) {
+    /* two samples averaged: a little closer to film's clumped response */
+    n[i] = Math.round((rnd() + rnd() - 1) * 63);
+  }
+  return n;
+})();
+const NW = W >> 1;
+
+function grade(g, frame) {
+  const img = g.getImageData(0, 0, W, H);
+  const d = img.data;
+  const off = (frame * 7919 + 104729) & NMASK;
+  let p = 0;
+  for (let y = 0; y < H; y++) {
+    const row = (y >> 1) * NW + off;
+    for (let x = 0; x < W; x++, p += 4) {
+      const r0 = d[p], g0 = d[p + 1], b0 = d[p + 2];
+      let L = (LR[r0] + LG[g0] + LB[b0]) >> 8;
+      if (L > 255) L = 255; else if (L < 0) L = 0;
+      const gn = (NOISE[(row + (x >> 1)) & NMASK] * GA[L]) >> 8;
+      let r = CR[r0], gg = CG[g0], b = CB[b0];
+      r  += ((L - r)  * DESAT) >> 8;
+      gg += ((L - gg) * DESAT) >> 8;
+      b  += ((L - b)  * DESAT) >> 8;
+      d[p]     = r  + AR[L] + gn;
+      d[p + 1] = gg + AG[L] + gn;
+      d[p + 2] = b  + AB[L] + gn;
+    }
+  }
+  g.putImageData(img, 0, 0);
+}
 
 /* warm bloom behind the iron for the closing beat */
 function drawRestGlow(g, cam, iron, t) {
@@ -1032,23 +1463,6 @@ function drawRestGlow(g, cam, iron, t) {
   g.restore();
 }
 
-function drawFinish(g) {
-  /* vignette */
-  let gr = g.createRadialGradient(W * 0.44, H * 0.42, H * 0.24, W * 0.5, H * 0.5, H * 0.80);
-  gr.addColorStop(0, 'rgba(43,43,40,0)');
-  gr.addColorStop(1, 'rgba(43,43,40,0.17)');
-  g.fillStyle = gr; g.fillRect(0, 0, W, H);
-
-  /* grain */
-  if (!GRAIN_PAT) GRAIN_PAT = g.createPattern(GRAIN, 'repeat');
-  g.save();
-  g.globalCompositeOperation = 'overlay';
-  g.globalAlpha = 0.055;
-  g.fillStyle = GRAIN_PAT;
-  g.fillRect(0, 0, W, H);
-  g.restore();
-}
-
 /* debug: the wrinkle boundary, locked to the plate's trailing edge */
 function drawBoundary(g, cam, iron) {
   if (PASS.R < -1e8) return;
@@ -1070,20 +1484,17 @@ function drawBoundary(g, cam, iron) {
 }
 
 /* ======================================================================
-   11. FRAME ASSEMBLY
+   14. FRAME ASSEMBLY
+   ----------------------------------------------------------------------
+   The scene is built in its own buffer, then printed through the camera
+   body (micro-shake) and the lens/film chain: halation, edge falloff,
+   S-curve, split tone and grain.
    ====================================================================== */
 const can  = document.getElementById('stage');
 const ctx  = can.getContext('2d', { alpha: false });
-const fcan = document.createElement('canvas');
-fcan.width = W; fcan.height = H;
-const fctx = fcan.getContext('2d');
-
-/* ctx.filter dissolves the quad faceting; fall back gracefully */
-const CAN_BLUR = (function () {
-  const c = document.createElement('canvas').getContext('2d');
-  c.filter = 'blur(2px)';
-  return c.filter === 'blur(2px)';
-})();
+const mcan = mkCan(W, H), mctx = mcan.getContext('2d');       // fabric mesh
+const fcan = mkCan(W, H), fctx = fcan.getContext('2d');       // whole cloth plate
+const scan = mkCan(W, H), sctx = scan.getContext('2d');       // scene buffer
 
 let lastMs = 0;
 
@@ -1097,31 +1508,58 @@ function render(tn) {
   PASS = passAt(t);
   updateSmoothness(t);
 
-  drawBackground(ctx, cam, light);
+  /* ---- scene ---------------------------------------------------------- */
+  sctx.setTransform(1, 0, 0, 1, 0, 0);
+  sctx.globalCompositeOperation = 'source-over';
+  sctx.globalAlpha = 1;
 
-  drawFabric(fctx, cam, iron, light);
+  /* the cloth plate: environment, mesh, lighting and surface detail all
+     built together so the lens defocuses them as one plane */
+  fctx.setTransform(1, 0, 0, 1, 0, 0);
+  fctx.globalCompositeOperation = 'source-over';
+  fctx.globalAlpha = 1;
+  drawBackground(fctx, cam, light);
+  drawFabric(mctx, cam, iron, light);
+  fctx.save();
+  if (CAN_BLUR) fctx.filter = 'blur(' + FAB_BLUR + 'px)';
+  fctx.drawImage(mcan, 0, 0);
+  fctx.restore();
+  drawClothLight(fctx, cam, light);
+  drawWeave(fctx, cam);
+  drawClothDetail(fctx, cam, iron);
+  if (P.showBoundary) drawBoundary(fctx, cam, iron);
+
+  compositeCloth(sctx, fcan, cam, syOf(iron.cy, cam));
+
+  drawRestGlow(sctx, cam, iron, t);
+  drawCastShadow(sctx, cam, iron, light);
+  drawContactShadow(sctx, cam, iron);
+  if (iron.vis) drawIron(sctx, cam, iron, t);
+  drawSteam(sctx, cam, t);
+  drawHaze(sctx, cam, light, t);
+
+  /* ---- camera body: print the scene through the micro-shake ----------- */
+  const sh = shakeAt(t);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
   ctx.save();
-  if (CAN_BLUR) ctx.filter = 'blur(' + FAB_BLUR + 'px)';
-  ctx.drawImage(fcan, 0, 0);
+  ctx.translate(W * 0.5 + sh.dx, H * 0.5 + sh.dy);
+  ctx.rotate(sh.rot);
+  ctx.scale(PUNCH * sh.zm, PUNCH * sh.zm);
+  ctx.drawImage(scan, -W * 0.5, -H * 0.5);
   ctx.restore();
 
-  drawClothLight(ctx, cam, light);
-  drawClothDetail(ctx, cam, iron);
-
-  if (P.showBoundary) drawBoundary(ctx, cam, iron);
-
-  drawRestGlow(ctx, cam, iron, t);
-  drawContactShadow(ctx, cam, iron);
-  if (iron.vis) drawIron(ctx, cam, iron, t);
-  drawSteam(ctx, cam, t);
-
-  drawFinish(ctx);
+  /* ---- lens and film -------------------------------------------------- */
+  halation(ctx, can);
+  edgeFalloff(ctx);
+  grade(ctx, Math.round(tn * TOTAL_FRAMES));
 
   lastMs = performance.now() - t0;
 }
 
 /* ======================================================================
-   12. PUBLIC API  —  everything the exporter needs
+   15. PUBLIC API  —  everything the exporter needs
    ====================================================================== */
 let current = 0, playing = true, rafId = 0, epoch = 0;
 
@@ -1165,7 +1603,7 @@ function tick(now) {
 }
 
 /* ======================================================================
-   13. DEV PANEL  —  only built for ?debug=1, so it can never appear in
+   16. DEV PANEL  —  only built for ?debug=1, so it can never appear in
    an exported frame (the exporter also grabs the canvas directly).
    ====================================================================== */
 const DEBUG = /(?:^|[?&])debug=1(?:&|$)/.test(location.search);
