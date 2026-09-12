@@ -1,0 +1,705 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Steam Iron — 9:16 Product Animation</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #14140f;
+    overflow: hidden;
+    font: 12px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: #EDE6D6;
+  }
+  #wrap {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  /* The canvas is the ONLY thing exported. It is always 1080x1920 internally. */
+  #stage {
+    display: block;
+    width: auto; height: 100vh;
+    max-width: 100vw;
+    aspect-ratio: 1080 / 1920;
+    background: #F2EBDD;
+  }
+
+  /* ---- dev panel (only injected when ?debug=1) ---- */
+  #panel {
+    position: fixed; left: 12px; bottom: 12px; z-index: 10;
+    width: 318px; padding: 12px 13px 13px;
+    background: rgba(18,18,14,.88);
+    border: 1px solid rgba(237,230,214,.18);
+    border-radius: 10px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 10px 30px rgba(0,0,0,.45);
+    user-select: none;
+  }
+  #panel h4 {
+    margin: 0 0 9px; font-size: 11px; font-weight: 600;
+    letter-spacing: .09em; text-transform: uppercase; color: #E8513A;
+  }
+  #panel .row { display: flex; align-items: center; gap: 8px; margin: 7px 0; }
+  #panel .row label { flex: 0 0 84px; font-size: 11px; color: #B9B3A3; }
+  #panel .row input[type=range] { flex: 1 1 auto; min-width: 0; accent-color: #E8513A; }
+  #panel .row .val { flex: 0 0 54px; text-align: right; font-variant-numeric: tabular-nums; font-size: 11px; }
+  #panel .scrub { margin: 2px 0 10px; }
+  #panel .scrub input { width: 100%; accent-color: #E8513A; }
+  #panel .bar { display: flex; gap: 6px; align-items: center; margin-top: 10px; }
+  #panel button {
+    font: inherit; font-size: 11px; padding: 4px 9px;
+    background: rgba(237,230,214,.09); color: #EDE6D6;
+    border: 1px solid rgba(237,230,214,.22); border-radius: 6px; cursor: pointer;
+  }
+  #panel button:hover { background: rgba(237,230,214,.18); }
+  #panel .meta { margin-top: 9px; font-size: 10.5px; color: #8C8779; font-variant-numeric: tabular-nums; }
+  #panel .chk { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #B9B3A3; }
+  #panel .chk input { accent-color: #E8513A; }
+  #panel .phase { color: #D8CFB8; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="stage" width="1080" height="1920"></canvas></div>
+<script>
+'use strict';
+/* =====================================================================
+   STEAM IRON — vertical 9:16 product animation
+   1080 x 1920 @ 30fps, 12s (360 frames)
+
+   Everything is drawn programmatically. The entire animation is a pure
+   function of one normalized timeline variable t in [0,1]:
+
+       window.seek(t)  ->  renders the exact frame for t
+
+   No accumulated state, no Math.random(), no external assets, so the
+   render is deterministic and frame-accurate for export.
+   ===================================================================== */
+
+/* ------------------------------- constants ------------------------------ */
+const W = 1080, H = 1920;
+const FPS = 30, DUR = 12, TOTAL_FRAMES = FPS * DUR;   // 360
+
+/* palette --------------------------------------------------------------- */
+const C_BG        = [242, 235, 221];   // #F2EBDD warm cream
+const C_BG_LIT    = [253, 248, 238];   // morning light
+const C_BG_DEEP   = [224, 212, 190];   // shaded cream
+const C_FAB       = [107, 115,  72];   // #6B7348 olive
+const C_FAB_LIT   = [172, 181, 118];   // wrinkle highlight
+const C_FAB_DARK  = [ 49,  55,  29];   // wrinkle shadow
+const C_FAB_AO    = [ 37,  42,  24];   // crease occlusion
+const C_INK       = [ 43,  43,  40];   // #2B2B28 charcoal
+const C_HOT       = [232,  81,  58];   // #E8513A accent
+const C_SHELL     = [235, 228, 213];   // iron body
+const C_SHELL_DK  = [206, 197, 179];
+const C_METAL     = [216, 213, 203];   // soleplate
+const C_METAL_DK  = [152, 150, 139];
+const C_GRIP      = [ 56,  56,  50];
+
+const rgb  = c => 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')';
+const rgba = (c, a) => 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')';
+
+/* ------------------------------- utilities ------------------------------ */
+const clamp  = (v, a, b) => v < a ? a : v > b ? b : v;
+const clamp01 = v => v < 0 ? 0 : v > 1 ? 1 : v;
+const lerp   = (a, b, k) => a + (b - a) * k;
+const seg    = (t, a, b) => clamp01((t - a) / (b - a));
+
+const smoothstep   = (e0, e1, x) => { const k = clamp01((x - e0) / (e1 - e0)); return k * k * (3 - 2 * k); };
+const smoothPulse  = k => { k = clamp01(k); return k * k * (3 - 2 * k); };
+const smootherstep = k => { k = clamp01(k); return k * k * k * (k * (k * 6 - 15) + 10); };
+const easeOutCubic = k => { k = clamp01(k); const m = 1 - k; return 1 - m * m * m; };
+const easeInCubic  = k => { k = clamp01(k); return k * k * k; };
+const easeOutQuint = k => { k = clamp01(k); const m = 1 - k; return 1 - m * m * m * m * m; };
+const easeInOutSine = k => 0.5 - 0.5 * Math.cos(Math.PI * clamp01(k));
+
+/* deterministic PRNG (mulberry32) — identical sequence every run */
+function mulberry32(a) {
+  return function () {
+    a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const SEED = 20260912;
+
+/* ======================================================================
+   1. TUNABLES  (the dev panel writes into this object)
+   ====================================================================== */
+const P = {
+  ironSpeed:   1.00,   // multiplier on the glide travel distance
+  wrinkleCount:  60,   // number of procedural wrinkle clusters
+  smoothMs:     250,   // per-wrinkle relax duration (ms), ease-out
+  showBoundary: false, // debug: draw the wrinkle-boundary line
+  cell:           7    // target on-screen size of one mesh quad, px
+};
+const FAB_BLUR = 2.6;   // composite blur that dissolves quad faceting
+
+/* ======================================================================
+   2. THE FABRIC
+   ----------------------------------------------------------------------
+   The shirt is a parametric surface over (u,v) in [0,1]^2, sampled as a
+   mesh of quads. World space == canvas space at camera zoom 1.
+
+      world x  ->  FAB.x0 .. FAB.x0 + FAB.w
+      world y  ->  FAB.y0 .. FAB.y0 + FAB.h      (fills the lower 2/3)
+
+   Surface height is  h(x,y) = drape(x,y) + gate(x) * wrinkles(x,y)
+   Shading comes from the gradient of h, so ridges read as light/dark
+   bands running across each crease rather than as drawn lines.
+   ====================================================================== */
+const FAB = { x0: -360, y0: 560, w: 1860, h: 1620 };
+const V_IRON = 0.30;                  // the fabric row the iron rides on
+
+/* macro shape of the cloth: wavy drape edge at the top, a gentle sag */
+function fabX(u, v) { return FAB.x0 + u * FAB.w + 14 * Math.sin(v * 2.3 + 1.1); }
+function fabY(u, v) {
+  const edge = 34 * Math.sin(u * 4.1 + 0.7) + 12 * Math.sin(u * 7.9 + 2.4);
+  return FAB.y0
+       + edge * Math.pow(1 - v, 2.6)
+       + v * FAB.h
+       + 26 * Math.sin(u * 2.1 + 0.4) * Math.sin(v * Math.PI);
+}
+const uOfX = x => (x - FAB.x0) / FAB.w;
+/* world y of the cloth surface under the iron at world x */
+const contactY = x => fabY(uOfX(x), V_IRON);
+
+/* always-present soft undulation of the cloth (survives ironing) */
+function drapeH(x, y) {
+  return 5.0 * Math.sin(x * 0.01320 + y * 0.00410 + 1.2)
+       + 3.8 * Math.sin(x * 0.00610 - y * 0.01020 + 3.4)
+       + 2.2 * Math.sin(x * 0.02150 + y * 0.01760 + 5.1);
+}
+
+/* ---------------------------------------------------------------------
+   Wrinkles: seeded sine ridges with randomized amplitude, wavelength,
+   rotation and an elliptical envelope (long along the crest, short
+   across it). Each carries `sm` = smoothness 0..1 for the current frame.
+   --------------------------------------------------------------------- */
+let WR = [];
+
+function buildWrinkles(count) {
+  const rnd = mulberry32(SEED);
+
+  /* three scales of crease so the cloth has a hierarchy -- a few long
+     dominant folds, a middle layer, and fine crimping -- rather than one
+     uniform texture. ~15% of grid cells are left calm on purpose. */
+  const TIER = [
+    { w: 0.26, amp: [13.0, 18.5], lam: [150, 225], rv: [520, 900] },
+    { w: 0.40, amp: [ 8.0, 12.5], lam: [ 96, 145], rv: [330, 540] },
+    { w: 0.34, amp: [ 4.4,  7.4], lam: [ 56,  86], rv: [185, 310] }
+  ];
+
+  const cols = Math.max(3, Math.round(Math.sqrt(count * FAB.w / FAB.h)));
+  const rows = Math.max(1, Math.ceil(count / cols));
+  const cells = [];
+  for (let j = 0; j < rows; j++)
+    for (let i = 0; i < cols; i++) cells.push([i, j]);
+  /* seeded shuffle: lowering the density slider thins the field evenly */
+  for (let i = cells.length - 1; i > 0; i--) {
+    const k = (rnd() * (i + 1)) | 0;
+    const tmp = cells[i]; cells[i] = cells[k]; cells[k] = tmp;
+  }
+
+  const out = [];
+  for (let n = 0; n < count && n < cells.length; n++) {
+    if (rnd() < 0.15) continue;                        // leave some cloth calm
+    const ci = cells[n][0], cj = cells[n][1];
+    const u = (ci + 0.5 + 0.92 * (rnd() - 0.5)) / cols;
+    const v = (cj + 0.5 + 0.92 * (rnd() - 0.5)) / rows;
+
+    let r = rnd(), ti = 0, acc = 0;
+    for (let i = 0; i < TIER.length; i++) { acc += TIER[i].w; if (r < acc) { ti = i; break; } ti = i; }
+    const T = TIER[ti];
+    const lam = lerp(T.lam[0], T.lam[1], rnd());
+    /* crest direction stays within ~+-50deg of horizontal, so the iron
+       always crosses the ridges as it travels left to right */
+    const wa = Math.PI * 0.5 + (rnd() - 0.5) * 1.75;   // wave-vector angle
+    out.push({
+      cx: fabX(u, v),
+      cy: fabY(u, v),
+      amp: lerp(T.amp[0], T.amp[1], rnd()),
+      k: 2 * Math.PI / lam,
+      phase: rnd() * Math.PI * 2,
+      ca: Math.cos(wa), sa: Math.sin(wa),
+      ru: lam * (1.05 + 0.55 * rnd()),                 // radius across crests
+      rv: lerp(T.rv[0], T.rv[1], rnd()),               // radius along crests
+      t0: Infinity,                                    // time the pass reaches it
+      sm: 0                                            // smoothness this frame
+    });
+  }
+  return out;
+}
+
+/* summed wrinkle height at a world point (ungated) */
+function wrinkleH(x, y) {
+  let h = 0;
+  for (let i = 0; i < WR.length; i++) {
+    const w = WR[i];
+    if (w.sm > 0.9985) continue;
+    const dx = x - w.cx, dy = y - w.cy;
+    const pu = (dx * w.ca + dy * w.sa) / w.ru;
+    const pv = (-dx * w.sa + dy * w.ca) / w.rv;
+    const d2 = pu * pu + pv * pv;
+    if (d2 > 4.2) continue;                            // envelope is ~0 out here
+    h += w.amp * (1 - w.sm) * Math.exp(-0.92 * d2)
+       * Math.sin(pu * w.ru * w.k + w.phase);
+  }
+  /* mild waveform sharpening: broader crests, steeper flanks -> folds */
+  const a = Math.abs(h);
+  return a < 0.001 ? 0 : Math.sign(h) * Math.pow(a / 17, 0.82) * 17;
+}
+
+/* ======================================================================
+   3. THE PASS  —  where the iron has been
+   ----------------------------------------------------------------------
+   The smoothed region of cloth is the band [L(t), R(t)] in world x.
+   R is the soleplate's trailing (rear) edge as it travels right; L opens
+   leftwards while the iron presses down on landing. `gateAt` returns
+   creasedness: 1 = fully creased, 0 = fully relaxed, with a narrow
+   transition so the boundary is crisp but never a hard aliased step.
+   ====================================================================== */
+const T_PRESS = 2.55, T_LAND = 3.00, T_GLIDE_END = 8.00;
+const PLATE_BACK = 104, PLATE_NOSE = 136;
+const X_START = 40, BASE_TRAVEL = 1192;
+const GATE_BAND = 11, PRE_RELAX = 150;
+
+let PASS = { L: 1e9, R: -1e9 };
+
+const travel   = () => BASE_TRAVEL * P.ironSpeed;
+const xEnd     = () => X_START + travel();
+const rFinal   = () => xEnd() - PLATE_BACK;
+const finalCx  = () => rFinal() - 588;
+/* camera follows part of the iron's travel so it stays framed */
+const followF  = () => clamp(1 - 633 / (travel() * 1.30), 0.15, 0.90);
+
+/* horizontal position of the soleplate centre during the glide */
+function glideX(t) {
+  const p = seg(t, T_LAND, T_GLIDE_END);
+  const e = 0.28 * easeInOutSine(p) + 0.72 * p;        // gentle in/out, mostly even
+  return X_START + travel() * e;
+}
+
+function passAt(t) {
+  if (t < T_PRESS)          return { L: 1e9, R: -1e9 };
+  const r0 = X_START - PLATE_BACK;
+  if (t < T_LAND)           return { L: lerp(r0, FAB.x0 - 140, easeOutCubic(seg(t, T_PRESS, T_LAND))), R: r0 };
+  if (t <= T_GLIDE_END)     return { L: FAB.x0 - 140, R: glideX(t) - PLATE_BACK };
+  return { L: FAB.x0 - 140, R: rFinal() };
+}
+
+function gateAt(x) {
+  /* ahead of the trailing edge the cloth is already easing off, so the
+     truncated ridges fade in over PRE_RELAX px instead of reading as hard
+     blocks -- the "smooth starts here" line itself stays crisp */
+  const a = smoothstep(PASS.R - GATE_BAND, PASS.R + GATE_BAND, x)
+          * (0.55 + 0.45 * smoothstep(PASS.R, PASS.R + PRE_RELAX, x));
+  const b = 1 - smoothstep(PASS.L - GATE_BAND, PASS.L + GATE_BAND, x);   // outside the pressed band
+  const g = a + b;
+  return g > 1 ? 1 : g;
+}
+
+/* ---------------------------------------------------------------------
+   For each wrinkle, find the time the pass reaches its centre. Done once
+   per rebuild by scanning the timeline, so per-frame smoothness is a
+   pure function of t (seekable, no accumulation).
+   --------------------------------------------------------------------- */
+function solvePassTimes() {
+  const dt = 0.004;
+  for (let i = 0; i < WR.length; i++) WR[i].t0 = Infinity;
+  let pending = WR.length;
+  for (let t = T_PRESS; t <= T_GLIDE_END + dt && pending > 0; t += dt) {
+    PASS = passAt(t);
+    for (let i = 0; i < WR.length; i++) {
+      const w = WR[i];
+      if (w.t0 !== Infinity) continue;
+      if (gateAt(w.cx) < 0.5) { w.t0 = t; pending--; }
+    }
+  }
+}
+
+function updateSmoothness(t) {
+  const d = Math.max(0.016, P.smoothMs / 1000);
+  for (let i = 0; i < WR.length; i++) {
+    const w = WR[i];
+    w.sm = w.t0 === Infinity ? 0 : easeOutCubic((t - w.t0) / d);
+  }
+}
+
+function rebuild() {
+  WR = buildWrinkles(P.wrinkleCount);
+  solvePassTimes();
+}
+
+/* ======================================================================
+   4. CAMERA
+   ====================================================================== */
+function camAt(t) {
+  let z, cx, cy;
+  if (t <= 2) {                                  // 0.0-2.0  slow macro push-in
+    const k = smootherstep(seg(t, 0, 2));
+    z = lerp(1.66, 1.86, k); cx = lerp(470, 436, k); cy = lerp(1168, 1128, k);
+  } else if (t <= T_LAND) {                      // 2.0-3.0  ease out to working framing
+    const k = smootherstep(seg(t, 2, T_LAND));
+    z = lerp(1.86, 1.30, k); cx = lerp(436, 250, k); cy = lerp(1128, 1026, k);
+  } else if (t <= T_GLIDE_END) {                 // 3.0-8.0  track the iron
+    z = 1.30; cx = 250 + followF() * (glideX(t) - X_START); cy = 1026;
+  } else if (t <= 10) {                          // 8.0-10.0 pull back for the reveal
+    const k = smootherstep(seg(t, T_GLIDE_END, 10));
+    const cx8 = 250 + followF() * travel();
+    z = lerp(1.30, 0.95, k); cx = lerp(cx8, finalCx(), k); cy = lerp(1026, 986, k);
+  } else {                                       // 10.0-12.0 settle
+    const k = smootherstep(seg(t, 10, 12));
+    z = lerp(0.95, 0.92, k); cx = finalCx(); cy = lerp(986, 994, k);
+  }
+  return { z: z, cx: cx, cy: cy };
+}
+const sxOf = (x, cam) => (x - cam.cx) * cam.z + W * 0.5;
+const syOf = (y, cam) => (y - cam.cy) * cam.z + H * 0.5;
+
+/* ======================================================================
+   5. IRON STATE
+   ----------------------------------------------------------------------
+   `lift` is height above the cloth in world px; it is exactly 0 for the
+   whole 3s-8s pass and for the final rest, so the soleplate is flush on
+   the fabric plane and can never appear to float.
+   ====================================================================== */
+const T_LIFTOFF = 8.00, T_GONE = 8.85, T_RETURN = 9.50, T_SETTLE = 10.50;
+
+function ironAt(t) {
+  let x, lift = 0, tilt = 0, vis = true;
+  if (t < 1.90) {                                        // no iron yet
+    return { x: X_START, lift: 900, tilt: 0, vis: false, contact: false, press: 0, cy: contactY(X_START) };
+  } else if (t < T_LAND) {                               // 2.0-3.0 descend and settle
+    const k = easeOutQuint(seg(t, 1.90, T_LAND));
+    x = X_START;
+    lift = 620 * (1 - k);
+    tilt = -0.075 * (1 - easeOutCubic(seg(t, 1.90, 2.86)));
+  } else if (t <= T_GLIDE_END) {                         // 3.0-8.0 the pass
+    x = glideX(t); lift = 0;
+  } else if (t < T_GONE) {                               // 8.0-8.85 lift and exit up
+    const k = easeInCubic(seg(t, T_LIFTOFF, T_GONE));
+    x = xEnd() + 70 * k;
+    lift = 980 * k;
+    tilt = -0.05 * k;
+  } else if (t < T_SETTLE) {                             // 8.85-10.5 return, descend
+    const k = easeOutCubic(seg(t, T_RETURN, T_SETTLE));
+    x = lerp(xEnd() + 70, finalCx(), smootherstep(seg(t, T_GONE, T_SETTLE)));
+    lift = 980 * (1 - k);
+    tilt = -0.055 * (1 - easeOutCubic(seg(t, T_RETURN, T_SETTLE - 0.16)));
+    vis = t > T_GONE + 0.30;
+  } else {                                               // 10.5-12.0 rest, centre frame
+    x = finalCx();
+    lift = 0;
+  }
+  if (lift < 0.02) lift = 0;
+  return {
+    x: x, lift: lift, tilt: tilt, vis: vis,
+    contact: lift === 0 || (t >= T_PRESS && t < T_LAND && lift < 44),
+    press: clamp01(1 - lift / 46),
+    cy: contactY(x)
+  };
+}
+
+/* compression of the cloth directly under the soleplate */
+function pressInfl(x, y, iron) {
+  if (iron.press <= 0) return 0;
+  const dx = (x - iron.x) / 132, dy = (y - iron.cy) / 152;
+  const d2 = dx * dx + dy * dy;
+  if (d2 >= 1) return 0;
+  return Math.pow(1 - d2, 1.4) * iron.press;
+}
+
+/* ======================================================================
+   6. LIGHT  —  soft warm morning light from the upper left.
+   During 0-2s the light rakes across to make the creases read.
+   ====================================================================== */
+function lightAt(t) {
+  const k = smootherstep(seg(t, 0, 2.1));
+  const az = lerp(263, 208, k) * Math.PI / 180;
+  const z  = lerp(0.40, 0.62, k);
+  const hm = Math.sqrt(1 - z * z);
+  return { x: Math.cos(az) * hm, y: Math.sin(az) * hm, z: z, rake: k };
+}
+
+/* ------ colour lookup table: shade/occlusion -> css colour string ------ */
+const LUT_S = 769, LUT_A = 11, LUT_SMAX = 1.25, LUT = new Array(LUT_S * LUT_A);
+/* soft staircase: flat plateaus with feathered edges -> vector-illustration
+   banding that still reads as depth rather than as contour lines */
+const BAND_STEPS = 4.0, BAND_SOFT = 0.44;
+function bandShade(s) {
+  const a = Math.abs(s);
+  const q = a * BAND_STEPS;
+  const f = Math.floor(q), fr = q - f;
+  const b = (f + smoothstep(0.5 - BAND_SOFT, 0.5 + BAND_SOFT, fr)) / BAND_STEPS;
+  /* band only the strong crease shading; the cloth's gentle drape stays
+     linear so flat areas never posterise into plateaus */
+  const w = smoothstep(0.11, 0.32, a);
+  const v = a * (1 - w) + b * w;
+  return s < 0 ? -v : v;
+}
+(function buildLUT() {
+  const mix = (a, b, k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+  const SPEC = [214, 216, 172];
+  for (let si = 0; si < LUT_S; si++) {
+    const s = bandShade((si / (LUT_S - 1)) * 2 * LUT_SMAX - LUT_SMAX);
+    for (let ai = 0; ai < LUT_A; ai++) {
+      const a = ai / (LUT_A - 1);
+      let c;
+      if (s > 0) {
+        const k = Math.min(1, s * 1.50);
+        c = mix(C_FAB, C_FAB_LIT, k);
+        c = mix(c, SPEC, Math.pow(k, 4) * 0.16);          // faint sheen on lit flanks
+      } else {
+        c = mix(C_FAB, C_FAB_DARK, Math.min(1, -s * 1.15));
+      }
+      c = mix(c, C_FAB_AO, a * 0.40);                     // crease occlusion
+      LUT[si * LUT_A + ai] = 'rgb(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ')';
+    }
+  }
+})();
+function lutIndex(s, a) {
+  let si = ((s + LUT_SMAX) / (2 * LUT_SMAX) * (LUT_S - 1) + 0.5) | 0;
+  if (si < 0) si = 0; else if (si >= LUT_S) si = LUT_S - 1;
+  let ai = (a * (LUT_A - 1) + 0.5) | 0;
+  if (ai < 0) ai = 0; else if (ai >= LUT_A) ai = LUT_A - 1;
+  return si * LUT_A + ai;
+}
+
+/* ======================================================================
+   7. MESH RENDER
+   ====================================================================== */
+const MAXC = 330, MAXR = 400, MAXN = (MAXC + 1) * (MAXR + 1);
+const gX = new Float32Array(MAXN), gY = new Float32Array(MAXN),
+      gH = new Float32Array(MAXN), gS = new Float32Array(MAXN), gA = new Float32Array(MAXN);
+
+/* silhouette of the cloth: wavy drape edge on top, off-frame elsewhere */
+function fabricPath(g, cam) {
+  g.beginPath();
+  const N = 128;
+  g.moveTo(sxOf(fabX(0, 0), cam) - 3, syOf(fabY(0, 0), cam));
+  for (let i = 1; i <= N; i++) {
+    const u = i / N;
+    g.lineTo(sxOf(fabX(u, 0), cam), syOf(fabY(u, 0), cam));
+  }
+  g.lineTo(sxOf(fabX(1, 1), cam) + 3, syOf(fabY(1, 1), cam));
+  g.lineTo(sxOf(fabX(0, 1), cam) - 3, syOf(fabY(0, 1), cam));
+  g.closePath();
+}
+
+/* displaced surface point, used by the seams so they ride the wrinkles */
+function surfacePoint(u, v, iron) {
+  let x = fabX(u, v), y = fabY(u, v);
+  let h = drapeH(x, y) + gateAt(x) * wrinkleH(x, y);
+  const pi = pressInfl(x, y, iron);
+  if (pi > 0) { h *= (1 - 0.80 * pi); x = iron.x + (x - iron.x) * (1 - 0.042 * pi); y += 7.5 * pi; }
+  return [x, y + h * 0.62 * smoothstep(0, 0.045, v)];
+}
+
+function drawFabric(g, cam, iron, light) {
+  g.clearRect(0, 0, W, H);
+  fabricPath(g, cam);
+  g.fillStyle = rgb(C_FAB);
+  g.fill();
+
+  /* --- only mesh the part of the cloth the camera can actually see --- */
+  const hw = W / (2 * cam.z), hh = H / (2 * cam.z);
+  const u0 = clamp01(uOfX(cam.cx - hw) - 0.035), u1 = clamp01(uOfX(cam.cx + hw) + 0.035);
+  const v0 = clamp01((cam.cy - hh - FAB.y0 - 110) / FAB.h),
+        v1 = clamp01((cam.cy + hh - FAB.y0 + 110) / FAB.h);
+  if (u1 - u0 < 1e-4 || v1 - v0 < 1e-4) return;
+
+  const cols = clamp(Math.round((u1 - u0) * FAB.w * cam.z / P.cell), 4, MAXC);
+  const rows = clamp(Math.round((v1 - v0) * FAB.h * cam.z / P.cell), 4, MAXR);
+  const du = (u1 - u0) / cols, dv = (v1 - v0) / rows;
+  const dxw = du * FAB.w, dyw = dv * FAB.h;
+  const stride = cols + 1;
+
+  /* pass 1 — surface position + height field */
+  for (let j = 0; j <= rows; j++) {
+    const v = v0 + j * dv;
+    const taper = smoothstep(0, 0.045, v);      // keep the drape edge clean
+    const row = j * stride;
+    for (let i = 0; i <= cols; i++) {
+      const u = u0 + i * du;
+      let x = fabX(u, v), y = fabY(u, v);
+      let h = drapeH(x, y) + gateAt(x) * wrinkleH(x, y);
+      const pi = pressInfl(x, y, iron);
+      if (pi > 0) {                             // cloth compresses under the plate
+        h *= (1 - 0.80 * pi);
+        x = iron.x + (x - iron.x) * (1 - 0.042 * pi);
+        y += 7.5 * pi;
+      }
+      const idx = row + i;
+      gH[idx] = h; gX[idx] = x; gY[idx] = y + h * 0.62 * taper;
+    }
+  }
+
+  /* pass 2 — shade from the height gradient, then to screen space */
+  const Lx = light.x, Ly = light.y, Lz = light.z, G = 1.10;
+  const zc = cam.z, ox = W * 0.5 - cam.cx * zc, oy = H * 0.5 - cam.cy * zc;
+  for (let j = 0; j <= rows; j++) {
+    const row = j * stride;
+    const jm = (j > 0 ? j - 1 : j) * stride, jp = (j < rows ? j + 1 : j) * stride;
+    const dj = ((jp - jm) / stride) * dyw;
+    for (let i = 0; i <= cols; i++) {
+      const idx = row + i;
+      const im = i > 0 ? i - 1 : i, ip = i < cols ? i + 1 : i;
+      const gx = (gH[row + ip] - gH[row + im]) / ((ip - im) * dxw) * G;
+      const gy = (gH[jp + i] - gH[jm + i]) / dj * G;
+      const inv = 1 / Math.sqrt(gx * gx + gy * gy + 1);
+      gS[idx] = (-gx * Lx - gy * Ly + Lz) * inv - Lz;
+      gA[idx] = clamp01((-gH[idx] - 12) / 11);         // creases only, not drape
+      gX[idx] = gX[idx] * zc + ox;
+      gY[idx] = gY[idx] * zc + oy;
+    }
+  }
+
+  /* pass 3 — fill the quads (0.5px bleed hides antialiased seams) */
+  const E = 0.5;
+  let prev = -1;
+  for (let j = 0; j < rows; j++) {
+    const r0 = j * stride, r1 = r0 + stride;
+    for (let i = 0; i < cols; i++) {
+      const a = r0 + i, b = a + 1, c = r1 + i, d = c + 1;
+      const s = (gS[a] + gS[b] + gS[c] + gS[d]) * 0.25;
+      const ao = (gA[a] + gA[b] + gA[c] + gA[d]) * 0.25;
+      if (s > -0.004 && s < 0.004 && ao < 0.012) continue;  // indistinguishable from base
+      const key = lutIndex(s, ao);
+      if (key !== prev) { g.fillStyle = LUT[key]; prev = key; }
+      g.beginPath();
+      g.moveTo(gX[a] - E, gY[a] - E);
+      g.lineTo(gX[b] + E, gY[b] - E);
+      g.lineTo(gX[d] + E, gY[d] + E);
+      g.lineTo(gX[c] - E, gY[c] + E);
+      g.fill();
+    }
+  }
+}
+
+/* ---------------- background: warm cream + morning light ---------------- */
+function drawBackground(ctx, cam, light) {
+  ctx.fillStyle = rgb(C_BG);
+  ctx.fillRect(0, 0, W, H);
+  const hx = W * (0.18 - 0.10 * light.x), hy = H * (0.04 - 0.06 * light.y);
+  let gr = ctx.createRadialGradient(hx, hy, 0, hx, hy, W * 1.45);
+  gr.addColorStop(0.00, rgba(C_BG_LIT, 1));
+  gr.addColorStop(0.42, rgba(C_BG, 0.55));
+  gr.addColorStop(1.00, rgba(C_BG_DEEP, 0.85));
+  ctx.fillStyle = gr;
+  ctx.fillRect(0, 0, W, H);
+}
+
+/* ------------- macro lighting wash applied to the cloth only ------------ */
+function drawClothLight(ctx, cam, light) {
+  ctx.save();
+  fabricPath(ctx, cam);
+  ctx.clip();
+
+  const hx = W * (0.18 - 0.10 * light.x), hy = H * (0.04 - 0.06 * light.y);
+
+  ctx.globalCompositeOperation = 'multiply';
+  let lg = ctx.createLinearGradient(hx, hy, W * 1.05, H * 1.05);
+  lg.addColorStop(0.00, 'rgb(255,253,246)');
+  lg.addColorStop(0.45, 'rgb(244,239,227)');
+  lg.addColorStop(1.00, 'rgb(203,192,164)');
+  ctx.fillStyle = lg;
+  ctx.globalAlpha = 0.85;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  let rg = ctx.createRadialGradient(hx, hy, 0, hx, hy, W * 1.15);
+  rg.addColorStop(0.00, 'rgba(255,247,226,0.26)');
+  rg.addColorStop(0.55, 'rgba(255,244,219,0.07)');
+  rg.addColorStop(1.00, 'rgba(255,244,219,0)');
+  ctx.fillStyle = rg;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.restore();
+}
+
+/* ------------------- drape edge, seams and topstitching ----------------- */
+function drawClothDetail(ctx, cam, iron) {
+  const z = cam.z;
+
+  /* the cloth's near edge, seated against the surface behind it */
+  fabricPath(ctx, cam);
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = rgba(C_INK, 0.055);
+  ctx.lineWidth = 30 * z;
+  ctx.stroke();
+  ctx.strokeStyle = rgba(C_INK, 0.88);
+  ctx.lineWidth = 2.7 * z;
+  ctx.stroke();
+
+  /* seams follow the displaced surface, so they buckle then straighten */
+  const seams = [
+    { kind: 'v', at: 0.705, a: 0.0, b: 1.0 },
+    { kind: 'h', at: 0.135, a: 0.02, b: 0.98 }
+  ];
+  for (const sm of seams) {
+    const pts = [];
+    const N = 72;
+    for (let i = 0; i <= N; i++) {
+      const k = sm.a + (sm.b - sm.a) * (i / N);
+      const p = sm.kind === 'v' ? surfacePoint(sm.at, k, iron) : surfacePoint(k, sm.at, iron);
+      pts.push([sxOf(p[0], cam), syOf(p[1], cam)]);
+    }
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.setLineDash([]);
+    ctx.strokeStyle = rgba(C_FAB_DARK, 0.45);
+    ctx.lineWidth = 2.4 * z;
+    ctx.stroke();
+    /* topstitch alongside */
+    ctx.save();
+    ctx.translate(sm.kind === 'v' ? 7 * z : 0, sm.kind === 'v' ? 0 : 7 * z);
+    ctx.setLineDash([8 * z, 9 * z]);
+    ctx.lineDashOffset = 0;
+    ctx.strokeStyle = rgba(C_FAB_LIT, 0.34);
+    ctx.lineWidth = 1.7 * z;
+    ctx.stroke();
+    ctx.restore();
+    ctx.setLineDash([]);
+  }
+}
+
+/* ===== TEMPORARY FABRIC-ONLY VERIFICATION TAIL (removed later) ===== */
+const can = document.getElementById('stage');
+const ctx = can.getContext('2d', { alpha: false });
+const fcan = document.createElement('canvas'); fcan.width = W; fcan.height = H;
+const fctx = fcan.getContext('2d');
+const canBlur = (function(){ const c = document.createElement('canvas').getContext('2d'); c.filter='blur(2px)'; return c.filter==='blur(2px)'; })();
+rebuild();
+let _blur = FAB_BLUR; window.setBlur = b => { _blur = b; };
+window.TOTAL_FRAMES = TOTAL_FRAMES;
+window.stats = {};
+function render(tn){
+  const t = tn * DUR, cam = camAt(t), iron = ironAt(t), light = lightAt(t);
+  PASS = passAt(t); updateSmoothness(t);
+  const t0 = performance.now();
+  drawBackground(ctx, cam, light);
+  drawFabric(fctx, cam, iron, light);
+  const tm = performance.now();
+  ctx.save(); if (canBlur) ctx.filter = 'blur(' + _blur + 'px)'; ctx.drawImage(fcan, 0, 0); ctx.restore();
+  drawClothLight(ctx, cam, light);
+  drawClothDetail(ctx, cam, iron);
+  if (P.showBoundary && PASS.R > -1e8) {
+    ctx.strokeStyle = rgb(C_HOT); ctx.lineWidth = 3;
+    const x = sxOf(PASS.R, cam);
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+  window.stats = { mesh: tm - t0, total: performance.now() - t0 };
+}
+window.seek = function(tn){ tn = clamp01(tn); render(tn); return tn; };
+window.snapshot = () => can.toDataURL('image/png');
+window.P = P; window.rebuild = rebuild;
+render(0);
+window.ready = true;
+</script>
+</body>
+</html>

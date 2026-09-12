@@ -1,0 +1,14 @@
+{
+  "name": "steam-iron-ad",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Vertical 9:16 steam-iron product animation rendered to canvas and exported to MP4",
+  "scripts": {
+    "export": "node export.js",
+    "frames": "node export.js --no-video",
+    "video": "node export.js --skip-frames"
+  },
+  "devDependencies": {
+    "puppeteer": "^23.11.1"
+  }
+}
